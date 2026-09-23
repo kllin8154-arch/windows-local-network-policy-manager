@@ -757,18 +757,94 @@ Add-Type -AssemblyName System.Drawing
 
 [Windows.Forms.Application]::EnableVisualStyles()
 
+# 美式复古主题：取自用户提供的配色参考图。
+# 主色严格控制在 #1A1A1A / #CDA47B / #9F4125 / #382020，
+# 仅补充少量同色系的暖白、暗面和边框色用于可读性。
+$script:Theme = @{
+    Background = [Drawing.Color]::FromArgb(26, 26, 26)      # #1A1A1A
+    Surface = [Drawing.Color]::FromArgb(43, 31, 29)
+    SurfaceAlt = [Drawing.Color]::FromArgb(56, 32, 32)      # #382020
+    Accent = [Drawing.Color]::FromArgb(205, 164, 123)       # #CDA47B
+    AccentStrong = [Drawing.Color]::FromArgb(159, 65, 37)   # #9F4125
+    WarmText = [Drawing.Color]::FromArgb(244, 228, 209)
+    MutedText = [Drawing.Color]::FromArgb(190, 158, 128)
+    Border = [Drawing.Color]::FromArgb(92, 61, 50)
+    DarkText = [Drawing.Color]::FromArgb(26, 26, 26)
+}
+
+function Set-UiInputTheme {
+    param([Parameter(Mandatory)]$Control)
+
+    $Control.BackColor = $script:Theme.Surface
+    $Control.ForeColor = $script:Theme.WarmText
+    if ($Control.PSObject.Properties.Name -contains 'BorderStyle') {
+        try { $Control.BorderStyle = 'FixedSingle' } catch { }
+    }
+}
+
+function Initialize-GridTheme {
+    param([Parameter(Mandatory)][Windows.Forms.DataGridView]$Grid)
+
+    $Grid.EnableHeadersVisualStyles = $false
+    $Grid.BackgroundColor = $script:Theme.Background
+    $Grid.BorderStyle = 'None'
+    $Grid.GridColor = $script:Theme.Border
+    $Grid.CellBorderStyle = 'SingleHorizontal'
+    $Grid.ColumnHeadersBorderStyle = 'None'
+    $Grid.ColumnHeadersHeight = 38
+    $Grid.ColumnHeadersDefaultCellStyle.BackColor = $script:Theme.Accent
+    $Grid.ColumnHeadersDefaultCellStyle.ForeColor = $script:Theme.DarkText
+    $Grid.ColumnHeadersDefaultCellStyle.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
+    $Grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = $script:Theme.Accent
+    $Grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = $script:Theme.DarkText
+    $Grid.DefaultCellStyle.BackColor = $script:Theme.Surface
+    $Grid.DefaultCellStyle.ForeColor = $script:Theme.WarmText
+    $Grid.DefaultCellStyle.SelectionBackColor = $script:Theme.AccentStrong
+    $Grid.DefaultCellStyle.SelectionForeColor = $script:Theme.WarmText
+    $Grid.DefaultCellStyle.Padding = [Windows.Forms.Padding]::new(5, 3, 5, 3)
+    $Grid.AlternatingRowsDefaultCellStyle.BackColor = $script:Theme.SurfaceAlt
+    $Grid.RowTemplate.Height = 32
+}
+
 function New-UiButton {
     param(
         [Parameter(Mandatory)][string]$Text,
-        [int]$Width = 100
+        [int]$Width = 100,
+        [ValidateSet('Secondary', 'Primary', 'Accent', 'Danger')][string]$Variant = 'Secondary'
     )
 
     $button = [Windows.Forms.Button]::new()
     $button.Text = $Text
     $button.Width = $Width
-    $button.Height = 32
+    $button.Height = 34
     $button.Margin = [Windows.Forms.Padding]::new(4, 8, 4, 8)
-    $button.FlatStyle = 'System'
+    $button.FlatStyle = 'Flat'
+    $button.FlatAppearance.BorderSize = 1
+    $button.UseVisualStyleBackColor = $false
+    $button.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
+
+    switch ($Variant) {
+        'Primary' {
+            $button.BackColor = $script:Theme.AccentStrong
+            $button.ForeColor = $script:Theme.WarmText
+            $button.FlatAppearance.BorderColor = $script:Theme.AccentStrong
+        }
+        'Accent' {
+            $button.BackColor = $script:Theme.Accent
+            $button.ForeColor = $script:Theme.DarkText
+            $button.FlatAppearance.BorderColor = $script:Theme.Accent
+        }
+        'Danger' {
+            $button.BackColor = $script:Theme.SurfaceAlt
+            $button.ForeColor = $script:Theme.Accent
+            $button.FlatAppearance.BorderColor = $script:Theme.AccentStrong
+        }
+        default {
+            $button.BackColor = $script:Theme.Background
+            $button.ForeColor = $script:Theme.Accent
+            $button.FlatAppearance.BorderColor = $script:Theme.Border
+        }
+    }
     $button
 }
 
@@ -785,12 +861,16 @@ function Show-RuleEditor {
     $dialog.MinimizeBox = $false
     $dialog.ShowInTaskbar = $false
     $dialog.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+    $dialog.BackColor = $script:Theme.Background
+    $dialog.ForeColor = $script:Theme.WarmText
 
     $labels = @('规则名称', '目标 IPv4 / CIDR', '指定网卡', '网关模式', '手动网关')
     for ($i = 0; $i -lt $labels.Count; $i++) {
         $label = [Windows.Forms.Label]::new()
         $label.Text = $labels[$i]
         $label.AutoSize = $true
+        $label.ForeColor = $script:Theme.Accent
+        $label.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
         $label.Location = [Drawing.Point]::new(28, 32 + ($i * 58))
         $dialog.Controls.Add($label)
     }
@@ -798,11 +878,13 @@ function Show-RuleEditor {
     $nameBox = [Windows.Forms.TextBox]::new()
     $nameBox.Location = [Drawing.Point]::new(170, 28)
     $nameBox.Size = [Drawing.Size]::new(410, 26)
+    Set-UiInputTheme -Control $nameBox
     $dialog.Controls.Add($nameBox)
 
     $destinationBox = [Windows.Forms.TextBox]::new()
     $destinationBox.Location = [Drawing.Point]::new(170, 86)
     $destinationBox.Size = [Drawing.Size]::new(410, 26)
+    Set-UiInputTheme -Control $destinationBox
     $dialog.Controls.Add($destinationBox)
 
     $adapterBox = [Windows.Forms.ComboBox]::new()
@@ -810,6 +892,7 @@ function Show-RuleEditor {
     $adapterBox.Size = [Drawing.Size]::new(410, 28)
     $adapterBox.DropDownStyle = 'DropDownList'
     $adapterBox.DisplayMember = 'Display'
+    Set-UiInputTheme -Control $adapterBox
     $adapters = Get-Adapters
     foreach ($adapter in $adapters) { [void]$adapterBox.Items.Add($adapter) }
     $dialog.Controls.Add($adapterBox)
@@ -818,6 +901,7 @@ function Show-RuleEditor {
     $gatewayModeBox.Location = [Drawing.Point]::new(170, 202)
     $gatewayModeBox.Size = [Drawing.Size]::new(410, 28)
     $gatewayModeBox.DropDownStyle = 'DropDownList'
+    Set-UiInputTheme -Control $gatewayModeBox
     [void]$gatewayModeBox.Items.Add('自动使用该网卡当前默认网关')
     [void]$gatewayModeBox.Items.Add('手动指定网关')
     $dialog.Controls.Add($gatewayModeBox)
@@ -825,22 +909,25 @@ function Show-RuleEditor {
     $gatewayBox = [Windows.Forms.TextBox]::new()
     $gatewayBox.Location = [Drawing.Point]::new(170, 260)
     $gatewayBox.Size = [Drawing.Size]::new(410, 26)
+    Set-UiInputTheme -Control $gatewayBox
     $dialog.Controls.Add($gatewayBox)
 
     $bypassCheck = [Windows.Forms.CheckBox]::new()
     $bypassCheck.Text = '同时绕过 Windows 系统代理（仅单个 IPv4）'
     $bypassCheck.AutoSize = $true
+    $bypassCheck.ForeColor = $script:Theme.MutedText
     $bypassCheck.Location = [Drawing.Point]::new(170, 312)
     $dialog.Controls.Add($bypassCheck)
 
     $enabledCheck = [Windows.Forms.CheckBox]::new()
     $enabledCheck.Text = '启用此规则'
     $enabledCheck.AutoSize = $true
+    $enabledCheck.ForeColor = $script:Theme.MutedText
     $enabledCheck.Location = [Drawing.Point]::new(170, 344)
     $enabledCheck.Checked = $true
     $dialog.Controls.Add($enabledCheck)
 
-    $saveButton = New-UiButton -Text '保存' -Width 92
+    $saveButton = New-UiButton -Text '保存' -Width 92 -Variant 'Primary'
     $saveButton.Location = [Drawing.Point]::new(386, 382)
     $dialog.Controls.Add($saveButton)
 
