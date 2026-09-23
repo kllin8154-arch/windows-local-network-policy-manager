@@ -2,7 +2,11 @@
 param(
     [switch]$SelfTest,
     [switch]$DumpStatus,
-    [switch]$UiSmokeTest
+    [switch]$UiSmokeTest,
+    [ValidateSet('ListRules', 'Discover', 'ApplyRule', 'RemoveRule', 'TestRule')]
+    [string]$Command,
+    [string]$RuleId,
+    [switch]$Approved
 )
 
 Set-StrictMode -Version Latest
@@ -297,6 +301,100 @@ function Get-SystemSnapshot {
     }
 }
 
+function Get-NetworkPolicyDiscovery {
+    $snapshot = Get-SystemSnapshot
+    $ipRows = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+
+    $adapterRows = foreach ($adapter in $snapshot.Adapters) {
+        $addresses = @($ipRows | Where-Object InterfaceIndex -eq $adapter.Index |
+            ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
+        [pscustomobject]@{
+            Name = $adapter.Name
+            Description = $adapter.Description
+            Guid = $adapter.Guid
+            Index = $adapter.Index
+            Status = $adapter.Status
+            Hardware = $adapter.Hardware
+            IPv4 = @($addresses)
+        }
+    }
+
+    $defaultRoutes = @($snapshot.Routes | Where-Object {
+        $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0'
+    } | Sort-Object RouteMetric | ForEach-Object {
+        [pscustomobject]@{
+            Destination = [string]$_.DestinationPrefix
+            InterfaceIndex = [int]$_.InterfaceIndex
+            InterfaceAlias = [string]$_.InterfaceAlias
+            Gateway = [string]$_.NextHop
+            Metric = [int]$_.RouteMetric
+        }
+    })
+
+    $specificRoutes = @($snapshot.Routes | Where-Object {
+        $_.DestinationPrefix -ne '0.0.0.0/0' -and
+        $_.NextHop -ne '0.0.0.0' -and
+        $_.DestinationPrefix -notlike '224.*' -and
+        $_.DestinationPrefix -notlike '255.*'
+    } | Sort-Object DestinationPrefix, InterfaceIndex, RouteMetric | ForEach-Object {
+        $route = $_
+        $prefix = ConvertTo-NormalizedPrefix -Value ([string]$route.DestinationPrefix)
+        $matchedRule = $null
+        foreach ($rule in $script:Rules) {
+            try {
+                if ((ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)) -ne $prefix) { continue }
+                $adapter = Resolve-Adapter -Rule $rule -Adapters $snapshot.Adapters
+                if ($adapter.Index -ne [int]$route.InterfaceIndex) { continue }
+                $expectedGateway = Get-RuleGateway -Rule $rule -Adapter $adapter -Routes $snapshot.Routes
+                if ($expectedGateway -ne [string]$route.NextHop) { continue }
+                $matchedRule = $rule
+                break
+            } catch { }
+        }
+        $stateEntry = if ($null -eq $matchedRule) { $null } else { Get-StateEntry -Id ([string]$matchedRule.Id) }
+        [pscustomobject]@{
+            Destination = $prefix
+            InterfaceIndex = [int]$route.InterfaceIndex
+            InterfaceAlias = [string]$route.InterfaceAlias
+            Gateway = [string]$route.NextHop
+            Metric = [int]$route.RouteMetric
+            Managed = $null -ne $matchedRule
+            RuleId = if ($null -eq $matchedRule) { '' } else { [string]$matchedRule.Id }
+            RuleName = if ($null -eq $matchedRule) { '' } else { [string]$matchedRule.Name }
+            Owned = $null -ne $stateEntry -and [bool]$stateEntry.RouteOwned
+        }
+    })
+
+    $proxyRows = foreach ($token in $snapshot.ProxyTokens) {
+        $matchingRule = @($script:Rules | Where-Object {
+            if (-not [bool]$_.BypassProxy) { return $false }
+            try { (Get-ProxyTokenForRule -Rule $_) -eq $token } catch { $false }
+        } | Select-Object -First 1)
+        [pscustomobject]@{
+            Token = [string]$token
+            Managed = $matchingRule.Count -gt 0
+            RuleId = if ($matchingRule.Count -gt 0) { [string]$matchingRule[0].Id } else { '' }
+        }
+    }
+
+    [pscustomobject]@{
+        GeneratedAt = (Get-Date).ToString('o')
+        Adapters = @($adapterRows)
+        DefaultRoutes = @($defaultRoutes)
+        SpecificRoutes = @($specificRoutes)
+        ProxyBypass = @($proxyRows)
+        UnmanagedSpecificRouteCount = @($specificRoutes | Where-Object { -not $_.Managed }).Count
+        UnmanagedProxyBypassCount = @($proxyRows | Where-Object { -not $_.Managed }).Count
+    }
+}
+
+function Get-RuleById {
+    param([Parameter(Mandatory)][string]$Id)
+    $rule = @($script:Rules | Where-Object Id -eq $Id | Select-Object -First 1)
+    if ($rule.Count -eq 0) { throw "找不到规则：$Id" }
+    $rule[0]
+}
+
 function Get-RuleStatus {
     param(
         [Parameter(Mandatory)]$Rule,
@@ -565,6 +663,40 @@ $script:Rules = Read-JsonArray -Path $script:RulesPath
 $script:State = Read-JsonArray -Path $script:StatePath
 Assert-Configuration
 
+if (-not [string]::IsNullOrWhiteSpace($Command)) {
+    switch ($Command) {
+        'ListRules' {
+            @($script:Rules) | ConvertTo-Json -Depth 8
+            exit 0
+        }
+        'Discover' {
+            Get-NetworkPolicyDiscovery | ConvertTo-Json -Depth 8
+            exit 0
+        }
+        'TestRule' {
+            if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'TestRule 需要 -RuleId。' }
+            Test-RulePolicy -Rule (Get-RuleById -Id $RuleId) | ConvertTo-Json -Depth 8
+            exit 0
+        }
+        'ApplyRule' {
+            if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'ApplyRule 需要 -RuleId。' }
+            if (-not $Approved) { throw 'ApplyRule 会修改 Windows 路由/代理；需要显式传入 -Approved。' }
+            $rule = Get-RuleById -Id $RuleId
+            Apply-RulePolicy -Rule $rule
+            Test-RulePolicy -Rule $rule | ConvertTo-Json -Depth 8
+            exit 0
+        }
+        'RemoveRule' {
+            if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'RemoveRule 需要 -RuleId。' }
+            if (-not $Approved) { throw 'RemoveRule 会修改 Windows 路由/代理；需要显式传入 -Approved。' }
+            $rule = Get-RuleById -Id $RuleId
+            Remove-RulePolicy -Rule $rule
+            [pscustomobject]@{ Removed = $true; RuleId = $RuleId } | ConvertTo-Json
+            exit 0
+        }
+    }
+}
+
 if ($SelfTest) {
     "SELF_TEST_OK rules=$($script:Rules.Count) state=$($script:State.Count)"
     exit 0
@@ -750,8 +882,142 @@ function Show-RuleEditor {
         }
     })
 
+
     if ($dialog.ShowDialog() -eq 'OK') { return $dialog.Tag }
     $null
+}
+
+function Show-DiscoveryDialog {
+    $discovery = Get-NetworkPolicyDiscovery
+    $dialog = [Windows.Forms.Form]::new()
+    $dialog.Text = '自动识别当前网络策略'
+    $dialog.ClientSize = [Drawing.Size]::new(1080, 640)
+    $dialog.MinimumSize = [Drawing.Size]::new(900, 560)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+
+    $summary = [Windows.Forms.Label]::new()
+    $summary.Dock = 'Top'
+    $summary.Height = 58
+    $summary.Padding = [Windows.Forms.Padding]::new(12, 8, 12, 4)
+    $summary.Text = "已识别 $($discovery.Adapters.Count) 张网卡、$($discovery.DefaultRoutes.Count) 条默认路由、$($discovery.SpecificRoutes.Count) 条特定目标路由。未纳入管理：$($discovery.UnmanagedSpecificRouteCount) 条路由、$($discovery.UnmanagedProxyBypassCount) 条代理绕过。"
+    $dialog.Controls.Add($summary)
+
+    $grid = [Windows.Forms.DataGridView]::new()
+    $grid.Dock = 'Fill'
+    $grid.ReadOnly = $true
+    $grid.AllowUserToAddRows = $false
+    $grid.AllowUserToDeleteRows = $false
+    $grid.RowHeadersVisible = $false
+    $grid.SelectionMode = 'FullRowSelect'
+    $grid.MultiSelect = $false
+    $grid.AutoGenerateColumns = $false
+    $dialog.Controls.Add($grid)
+
+    foreach ($spec in @(
+        @('Managed','管理状态',95),
+        @('Destination','目标 IPv4 / CIDR',170),
+        @('Adapter','网卡',220),
+        @('Gateway','网关',150),
+        @('Metric','指标',70),
+        @('RuleName','匹配规则',260)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'RuleName') { $column.AutoSizeMode = 'Fill' }
+        [void]$grid.Columns.Add($column)
+    }
+
+    foreach ($route in $discovery.SpecificRoutes) {
+        $index = $grid.Rows.Add(
+            $(if ($route.Managed) { if ($route.Owned) { '已接管' } else { '已匹配' } } else { '未管理' }),
+            [string]$route.Destination,
+            [string]$route.InterfaceAlias,
+            [string]$route.Gateway,
+            [string]$route.Metric,
+            [string]$route.RuleName
+        )
+        $grid.Rows[$index].Tag = $route
+        if (-not $route.Managed) {
+            $grid.Rows[$index].DefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(255, 251, 235)
+        }
+    }
+
+    $buttons = [Windows.Forms.FlowLayoutPanel]::new()
+    $buttons.Dock = 'Bottom'
+    $buttons.Height = 54
+    $buttons.Padding = [Windows.Forms.Padding]::new(8, 4, 8, 4)
+    $buttons.FlowDirection = 'RightToLeft'
+    $dialog.Controls.Add($buttons)
+
+    $closeButton = New-UiButton -Text '关闭' -Width 88
+    $importButton = New-UiButton -Text '导入所选' -Width 100
+    $adoptButton = New-UiButton -Text '导入并接管' -Width 112
+    $buttons.Controls.Add($closeButton)
+    $buttons.Controls.Add($adoptButton)
+    $buttons.Controls.Add($importButton)
+
+    $closeButton.Add_Click({ $dialog.Close() })
+
+    $importRoute = {
+        param([bool]$TakeOwnership)
+        if ($grid.SelectedRows.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show('请先选择一条已识别的特定目标路由。', '提示', 'OK', 'Information') | Out-Null
+            return
+        }
+        $route = $grid.SelectedRows[0].Tag
+        if ($route.Managed) {
+            [Windows.Forms.MessageBox]::Show('该路由已经匹配现有规则，无需重复导入。', '提示', 'OK', 'Information') | Out-Null
+            return
+        }
+        $adapter = @(Get-Adapters | Where-Object Index -eq ([int]$route.InterfaceIndex) | Select-Object -First 1)
+        if ($adapter.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show('无法识别该路由对应的网卡。', '导入失败', 'OK', 'Error') | Out-Null
+            return
+        }
+        $proxyToken = ([string]$route.Destination).Split('/')[0]
+        $bypass = ([string]$route.Destination).EndsWith('/32') -and $proxyToken -in @(Get-ProxyTokens)
+        $newRule = [pscustomobject]@{
+            Id = [Guid]::NewGuid().ToString('N')
+            Name = "自动识别 - $($route.Destination)"
+            Destination = [string]$route.Destination
+            AdapterGuid = [string]$adapter[0].Guid
+            AdapterDescription = [string]$adapter[0].Description
+            GatewayMode = 'Manual'
+            Gateway = [string]$route.Gateway
+            BypassProxy = [bool]$bypass
+            Enabled = $true
+            OwnExistingRoute = [bool]$TakeOwnership
+            OwnExistingProxy = [bool]($TakeOwnership -and $bypass)
+        }
+        $oldRules = @($script:Rules)
+        try {
+            $script:Rules += $newRule
+            Assert-Configuration
+            Save-Rules
+            Write-AppLog -Message "从当前系统导入规则：$($newRule.Name)；接管=$TakeOwnership"
+            [Windows.Forms.MessageBox]::Show(
+                $(if ($TakeOwnership) { '已导入并标记为由本程序接管。以后撤销该规则时会删除对应路由。' } else { '已导入为规则，但不接管已有路由。' }),
+                '导入完成', 'OK', 'Information') | Out-Null
+            $dialog.Close()
+            Refresh-Grid
+        } catch {
+            $script:Rules = $oldRules
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, '导入失败', 'OK', 'Error') | Out-Null
+        }
+    }
+
+    $importButton.Add_Click({ & $importRoute $false })
+    $adoptButton.Add_Click({
+        $answer = [Windows.Forms.MessageBox]::Show(
+            '接管后，本程序会认为该已有路由属于自己管理；以后点击“撤销”时可以删除它。确定接管吗？',
+            '确认接管', 'YesNo', 'Warning')
+        if ($answer -eq 'Yes') { & $importRoute $true }
+    })
+
+    [void]$dialog.ShowDialog($form)
 }
 
 $form = [Windows.Forms.Form]::new()
@@ -804,8 +1070,9 @@ $applyAllButton = New-UiButton -Text '应用全部' -Width 96
 $removeButton = New-UiButton -Text '撤销所选' -Width 96
 $testButton = New-UiButton -Text '测试所选' -Width 96
 $refreshButton = New-UiButton -Text '刷新状态' -Width 96
+$discoverButton = New-UiButton -Text '识别当前策略' -Width 112
 @($addButton, $editButton, $deleteButton, $applyButton, $applyAllButton,
-    $removeButton, $testButton, $refreshButton) | ForEach-Object { $toolbar.Controls.Add($_) }
+    $removeButton, $testButton, $refreshButton, $discoverButton) | ForEach-Object { $toolbar.Controls.Add($_) }
 
 $logBox = [Windows.Forms.RichTextBox]::new()
 $logBox.Dock = 'Bottom'
@@ -1095,6 +1362,7 @@ $testButton.Add_Click({
 })
 
 $refreshButton.Add_Click({ Refresh-Grid })
+$discoverButton.Add_Click({ Show-DiscoveryDialog })
 
 $isAdministrator = Test-IsAdministrator
 if (-not $isAdministrator) {
@@ -1111,6 +1379,15 @@ if (Test-Path -LiteralPath $script:LogPath) {
 $form.Add_Shown({
     Write-AppLog -Message "程序启动；管理员=$isAdministrator"
     Refresh-Grid
+    try {
+        $discovery = Get-NetworkPolicyDiscovery
+        Write-AppLog -Message "自动识别完成：特定目标路由=$($discovery.SpecificRoutes.Count)，未管理=$($discovery.UnmanagedSpecificRouteCount)，代理绕过未管理=$($discovery.UnmanagedProxyBypassCount)"
+        if (-not $UiSmokeTest -and ($discovery.UnmanagedSpecificRouteCount -gt 0 -or $discovery.UnmanagedProxyBypassCount -gt 0)) {
+            $form.BeginInvoke([Action]{ Show-DiscoveryDialog }) | Out-Null
+        }
+    } catch {
+        Write-AppLog -Message ("自动识别失败：" + $_.Exception.Message) -Level 'WARN'
+    }
     if ($UiSmokeTest) {
         $script:SmokeTimer = [Windows.Forms.Timer]::new()
         $script:SmokeTimer.Interval = 1200
