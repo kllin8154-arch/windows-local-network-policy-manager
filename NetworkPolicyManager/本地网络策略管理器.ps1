@@ -1142,7 +1142,7 @@ function Show-DiscoveryDialog {
     $grid.AllowUserToResizeRows = $false
     $grid.RowHeadersVisible = $false
     $grid.SelectionMode = 'FullRowSelect'
-    $grid.MultiSelect = $false
+    $grid.MultiSelect = $true
     $grid.AutoGenerateColumns = $false
     Initialize-GridTheme -Grid $grid
     $routeTab.Controls.Add($grid)
@@ -1163,7 +1163,7 @@ function Show-DiscoveryDialog {
         [void]$grid.Columns.Add($column)
     }
 
-    foreach ($route in $discovery.SpecificRoutes) {
+    foreach ($route in @($discovery.SpecificRoutes | Sort-Object @{ Expression = { if ($_.Managed) { 1 } else { 0 } } }, Destination)) {
         $stateText = if ($route.Managed) {
             if ($route.Owned) { '已接管' } else { '已匹配' }
         } else { '未管理' }
@@ -1277,58 +1277,111 @@ function Show-DiscoveryDialog {
     }
 
     $closeButton = New-UiButton -Text '关闭' -Width 88
-    $importButton = New-UiButton -Text '仅导入规则' -Width 108 -Variant 'Accent'
+    $exportButton = New-UiButton -Text '导出诊断快照' -Width 118
+    $importButton = New-UiButton -Text '导入所选' -Width 100 -Variant 'Accent'
     $adoptButton = New-UiButton -Text '导入并接管' -Width 112 -Variant 'Primary'
     $buttons.Controls.Add($closeButton)
+    $buttons.Controls.Add($exportButton)
     $buttons.Controls.Add($adoptButton)
     $buttons.Controls.Add($importButton)
 
     $closeButton.Add_Click({ $dialog.Close() })
 
-    $importRoute = {
-        param([bool]$TakeOwnership)
-        if ($grid.SelectedRows.Count -eq 0) {
-            [Windows.Forms.MessageBox]::Show('请先在“特定路由”页选择一条路由。', '提示', 'OK', 'Information') | Out-Null
-            return
-        }
-        $route = $grid.SelectedRows[0].Tag
-        if ($route.Managed) {
-            [Windows.Forms.MessageBox]::Show('该路由已经匹配现有规则，无需重复导入。', '提示', 'OK', 'Information') | Out-Null
-            return
-        }
-        $adapter = @(Get-Adapters | Where-Object Index -eq ([int]$route.InterfaceIndex) | Select-Object -First 1)
-        if ($adapter.Count -eq 0) {
-            [Windows.Forms.MessageBox]::Show('无法识别该路由对应的网卡。', '导入失败', 'OK', 'Error') | Out-Null
-            return
-        }
-        $proxyToken = ([string]$route.Destination).Split('/')[0]
-        $bypass = ([string]$route.Destination).EndsWith('/32') -and $proxyToken -in @(Get-ProxyTokens)
-        $newRule = [pscustomobject]@{
-            Id = [Guid]::NewGuid().ToString('N')
-            Name = "识别导入 - $($route.Destination)"
-            Destination = [string]$route.Destination
-            AdapterGuid = [string]$adapter[0].Guid
-            AdapterDescription = [string]$adapter[0].Description
-            GatewayMode = 'Manual'
-            Gateway = [string]$route.Gateway
-            BypassProxy = [bool]$bypass
-            Enabled = $true
-            OwnExistingRoute = [bool]$TakeOwnership
-            OwnExistingProxy = [bool]($TakeOwnership -and $bypass)
-        }
-        $oldRules = @($script:Rules)
+    $exportButton.Add_Click({
         try {
-            $script:Rules += $newRule
+            $save = [Windows.Forms.SaveFileDialog]::new()
+            $save.Title = '导出当前网络诊断快照'
+            $save.Filter = 'JSON 文件 (*.json)|*.json'
+            $save.FileName = 'network-policy-snapshot-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'
+            if ($save.ShowDialog($dialog) -eq 'OK') {
+                $discovery | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $save.FileName -Encoding UTF8
+                Write-AppLog -Message "已导出网络诊断快照：$($save.FileName)"
+            }
+        } catch {
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, '导出失败', 'OK', 'Error') | Out-Null
+        }
+    })
+
+    $importRoutes = {
+        param([bool]$TakeOwnership)
+
+        $selectedRoutes = @(
+            $grid.SelectedRows |
+                ForEach-Object { $_.Tag } |
+                Where-Object { $null -ne $_ -and -not $_.Managed }
+        )
+        if ($selectedRoutes.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show(
+                '请在“特定路由”页选择至少一条“未管理”的路由。可按 Ctrl / Shift 多选。',
+                '提示', 'OK', 'Information') | Out-Null
+            return
+        }
+
+        $oldRules = @($script:Rules)
+        $added = [Collections.Generic.List[string]]::new()
+        $skipped = [Collections.Generic.List[string]]::new()
+        try {
+            $adapters = Get-Adapters
+            $proxyTokens = @(Get-ProxyTokens)
+
+            foreach ($route in $selectedRoutes) {
+                $prefix = ConvertTo-NormalizedPrefix -Value ([string]$route.Destination)
+                $alreadyDefined = @($script:Rules | Where-Object {
+                    (ConvertTo-NormalizedPrefix -Value ([string]$_.Destination)) -eq $prefix
+                }).Count -gt 0
+                if ($alreadyDefined) {
+                    $skipped.Add("$prefix：已有规则定义")
+                    continue
+                }
+
+                $adapter = @($adapters | Where-Object Index -eq ([int]$route.InterfaceIndex) | Select-Object -First 1)
+                if ($adapter.Count -eq 0) {
+                    $skipped.Add("$prefix：无法识别对应网卡")
+                    continue
+                }
+
+                $proxyToken = $prefix.Split('/')[0]
+                $bypass = $prefix.EndsWith('/32') -and $proxyToken -in $proxyTokens
+                $newRule = [pscustomobject]@{
+                    Id = [Guid]::NewGuid().ToString('N')
+                    Name = "识别导入 - $prefix"
+                    Destination = $prefix
+                    AdapterGuid = [string]$adapter[0].Guid
+                    AdapterDescription = [string]$adapter[0].Description
+                    GatewayMode = 'Manual'
+                    Gateway = [string]$route.Gateway
+                    BypassProxy = [bool]$bypass
+                    Enabled = $true
+                    OwnExistingRoute = [bool]$TakeOwnership
+                    OwnExistingProxy = [bool]($TakeOwnership -and $bypass)
+                }
+                $script:Rules += $newRule
+                $added.Add($prefix)
+            }
+
+            if ($added.Count -eq 0) {
+                $script:Rules = $oldRules
+                [Windows.Forms.MessageBox]::Show(
+                    "没有可导入的规则。" + [Environment]::NewLine + ($skipped -join [Environment]::NewLine),
+                    '未导入', 'OK', 'Information') | Out-Null
+                return
+            }
+
             Assert-Configuration
             Save-Rules
-            Write-AppLog -Message "从当前系统导入规则：$($newRule.Name)；接管=$TakeOwnership"
-            [Windows.Forms.MessageBox]::Show(
-                $(if ($TakeOwnership) {
-                    '已导入并接管。以后撤销此规则时，本程序可以删除对应路由。'
-                } else {
-                    '已导入为规则，但保留为外部已有策略；撤销规则不会主动删除原有路由。'
-                }),
-                '导入完成', 'OK', 'Information') | Out-Null
+            Write-AppLog -Message "从当前系统批量导入 $($added.Count) 条规则；接管=$TakeOwnership"
+
+            $message = "已导入 $($added.Count) 条规则。"
+            if ($TakeOwnership) {
+                $message += [Environment]::NewLine + '这些已有路由现在由本程序接管，后续撤销时可以删除。'
+            } else {
+                $message += [Environment]::NewLine + '仅保存规则定义，不取得已有路由所有权。'
+            }
+            if ($skipped.Count -gt 0) {
+                $message += [Environment]::NewLine + [Environment]::NewLine +
+                    "跳过 $($skipped.Count) 条：" + [Environment]::NewLine + ($skipped -join [Environment]::NewLine)
+            }
+            [Windows.Forms.MessageBox]::Show($message, '导入完成', 'OK', 'Information') | Out-Null
             $dialog.Close()
             Refresh-Grid
         } catch {
@@ -1337,12 +1390,17 @@ function Show-DiscoveryDialog {
         }
     }
 
-    $importButton.Add_Click({ & $importRoute $false })
+    $importButton.Add_Click({ & $importRoutes $false })
     $adoptButton.Add_Click({
+        $count = @($grid.SelectedRows | ForEach-Object { $_.Tag } | Where-Object { $null -ne $_ -and -not $_.Managed }).Count
+        if ($count -eq 0) {
+            [Windows.Forms.MessageBox]::Show('请先选择未管理路由。', '提示', 'OK', 'Information') | Out-Null
+            return
+        }
         $answer = [Windows.Forms.MessageBox]::Show(
-            '接管意味着本程序取得该已有路由的管理权；以后撤销规则时可以删除它。确定继续吗？',
+            "将接管所选 $count 条已有路由。以后撤销对应规则时，本程序可以删除这些路由。确定继续吗？",
             '确认接管现有策略', 'YesNo', 'Warning')
-        if ($answer -eq 'Yes') { & $importRoute $true }
+        if ($answer -eq 'Yes') { & $importRoutes $true }
     })
 
     [void]$dialog.ShowDialog($form)
