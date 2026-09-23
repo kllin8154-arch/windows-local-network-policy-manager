@@ -43,3 +43,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 `ApplyRule` 和 `RemoveRule` 会修改系统网络，除管理员权限外还必须显式带 `-Approved`。
 
 MCP 服务位于 `mcp/`，使用官方 MCP TypeScript SDK，通过 stdio 向 AI 客户端提供上述能力。详见 `mcp/README.md`。
+
+## 界面视觉规范
+
+界面采用深色美式复古配色与统一控件规范。后续 UI 修改请先阅读 `UI_STYLE.md`，并复用主脚本内的主题变量与控件样式函数。
