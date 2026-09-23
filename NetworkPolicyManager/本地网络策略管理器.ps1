@@ -1012,35 +1012,107 @@ function Show-DiscoveryDialog {
     $discovery = Get-NetworkPolicyDiscovery
     $dialog = [Windows.Forms.Form]::new()
     $dialog.Text = '自动识别当前网络策略'
-    $dialog.ClientSize = [Drawing.Size]::new(1080, 640)
-    $dialog.MinimumSize = [Drawing.Size]::new(900, 560)
+    $dialog.ClientSize = [Drawing.Size]::new(1120, 700)
+    $dialog.MinimumSize = [Drawing.Size]::new(940, 600)
     $dialog.StartPosition = 'CenterParent'
     $dialog.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+    $dialog.BackColor = $script:Theme.Background
+    $dialog.ForeColor = $script:Theme.WarmText
 
-    $summary = [Windows.Forms.Label]::new()
-    $summary.Dock = 'Top'
-    $summary.Height = 58
-    $summary.Padding = [Windows.Forms.Padding]::new(12, 8, 12, 4)
-    $summary.Text = "已识别 $($discovery.Adapters.Count) 张网卡、$($discovery.DefaultRoutes.Count) 条默认路由、$($discovery.SpecificRoutes.Count) 条特定目标路由。未纳入管理：$($discovery.UnmanagedSpecificRouteCount) 条路由、$($discovery.UnmanagedProxyBypassCount) 条代理绕过。"
-    $dialog.Controls.Add($summary)
+    $hero = [Windows.Forms.Panel]::new()
+    $hero.Dock = 'Top'
+    $hero.Height = 88
+    $hero.BackColor = $script:Theme.Background
+    $dialog.Controls.Add($hero)
+
+    $heroBar = [Windows.Forms.Panel]::new()
+    $heroBar.BackColor = $script:Theme.AccentStrong
+    $heroBar.Location = [Drawing.Point]::new(16, 15)
+    $heroBar.Size = [Drawing.Size]::new(6, 56)
+    $hero.Controls.Add($heroBar)
+
+    $heroTitle = [Windows.Forms.Label]::new()
+    $heroTitle.Text = '当前网络策略识别'
+    $heroTitle.Font = [Drawing.Font]::new('Microsoft YaHei UI', 15, [Drawing.FontStyle]::Bold)
+    $heroTitle.ForeColor = $script:Theme.Accent
+    $heroTitle.AutoSize = $true
+    $heroTitle.Location = [Drawing.Point]::new(34, 11)
+    $hero.Controls.Add($heroTitle)
+
+    $heroText = [Windows.Forms.Label]::new()
+    $heroText.Text = "识别到 $($discovery.Adapters.Count) 张网卡 · $($discovery.DefaultRoutes.Count) 条默认路由 · $($discovery.SpecificRoutes.Count) 条特定路由；未管理 $($discovery.UnmanagedSpecificRouteCount) 条。自动识别仅查看，接管已有策略必须由你确认。"
+    $heroText.ForeColor = $script:Theme.MutedText
+    $heroText.AutoSize = $true
+    $heroText.MaximumSize = [Drawing.Size]::new(1020, 0)
+    $heroText.Location = [Drawing.Point]::new(35, 48)
+    $hero.Controls.Add($heroText)
+
+    $buttons = [Windows.Forms.FlowLayoutPanel]::new()
+    $buttons.Dock = 'Bottom'
+    $buttons.Height = 58
+    $buttons.Padding = [Windows.Forms.Padding]::new(8, 4, 12, 4)
+    $buttons.FlowDirection = 'RightToLeft'
+    $buttons.BackColor = $script:Theme.Background
+    $dialog.Controls.Add($buttons)
+
+    $tabs = [Windows.Forms.TabControl]::new()
+    $tabs.Dock = 'Fill'
+    $tabs.DrawMode = 'OwnerDrawFixed'
+    $tabs.SizeMode = 'Fixed'
+    $tabs.ItemSize = [Drawing.Size]::new(150, 34)
+    $tabs.Padding = [Drawing.Point]::new(16, 5)
+    $dialog.Controls.Add($tabs)
+
+    $tabs.Add_DrawItem({
+        param($sender, $eventArgs)
+        $tab = $sender.TabPages[$eventArgs.Index]
+        $selected = $eventArgs.Index -eq $sender.SelectedIndex
+        $back = if ($selected) { $script:Theme.Accent } else { $script:Theme.SurfaceAlt }
+        $fore = if ($selected) { $script:Theme.DarkText } else { $script:Theme.Accent }
+        $eventArgs.Graphics.FillRectangle([Drawing.SolidBrush]::new($back), $eventArgs.Bounds)
+        $font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
+        $flags = [Drawing.StringFormat]::new()
+        $flags.Alignment = 'Center'
+        $flags.LineAlignment = 'Center'
+        $eventArgs.Graphics.DrawString($tab.Text, $font, [Drawing.SolidBrush]::new($fore), $eventArgs.Bounds, $flags)
+        $font.Dispose()
+        $flags.Dispose()
+    })
+
+    $routeTab = [Windows.Forms.TabPage]::new()
+    $routeTab.Text = "特定路由  $($discovery.SpecificRoutes.Count)"
+    $routeTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($routeTab)
+
+    $adapterTab = [Windows.Forms.TabPage]::new()
+    $adapterTab.Text = "网卡概览  $($discovery.Adapters.Count)"
+    $adapterTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($adapterTab)
+
+    $proxyTab = [Windows.Forms.TabPage]::new()
+    $proxyTab.Text = "代理绕过  $($discovery.ProxyBypass.Count)"
+    $proxyTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($proxyTab)
 
     $grid = [Windows.Forms.DataGridView]::new()
     $grid.Dock = 'Fill'
     $grid.ReadOnly = $true
     $grid.AllowUserToAddRows = $false
     $grid.AllowUserToDeleteRows = $false
+    $grid.AllowUserToResizeRows = $false
     $grid.RowHeadersVisible = $false
     $grid.SelectionMode = 'FullRowSelect'
     $grid.MultiSelect = $false
     $grid.AutoGenerateColumns = $false
-    $dialog.Controls.Add($grid)
+    Initialize-GridTheme -Grid $grid
+    $routeTab.Controls.Add($grid)
 
     foreach ($spec in @(
         @('Managed','管理状态',95),
-        @('Destination','目标 IPv4 / CIDR',170),
-        @('Adapter','网卡',220),
-        @('Gateway','网关',150),
-        @('Metric','指标',70),
+        @('Destination','目标 IPv4 / CIDR',175),
+        @('Adapter','实际网卡',210),
+        @('Gateway','下一跳',150),
+        @('Metric','Metric',72),
         @('RuleName','匹配规则',260)
     )) {
         $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
@@ -1052,30 +1124,121 @@ function Show-DiscoveryDialog {
     }
 
     foreach ($route in $discovery.SpecificRoutes) {
+        $stateText = if ($route.Managed) {
+            if ($route.Owned) { '已接管' } else { '已匹配' }
+        } else { '未管理' }
         $index = $grid.Rows.Add(
-            $(if ($route.Managed) { if ($route.Owned) { '已接管' } else { '已匹配' } } else { '未管理' }),
+            $stateText,
             [string]$route.Destination,
             [string]$route.InterfaceAlias,
             [string]$route.Gateway,
             [string]$route.Metric,
             [string]$route.RuleName
         )
-        $grid.Rows[$index].Tag = $route
-        if (-not $route.Managed) {
-            $grid.Rows[$index].DefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(255, 251, 235)
+        $row = $grid.Rows[$index]
+        $row.Tag = $route
+        if ($route.Owned) {
+            $row.DefaultCellStyle.BackColor = $script:Theme.SurfaceAlt
+            $row.DefaultCellStyle.ForeColor = $script:Theme.Accent
+        } elseif ($route.Managed) {
+            $row.DefaultCellStyle.BackColor = $script:Theme.Surface
+            $row.DefaultCellStyle.ForeColor = $script:Theme.WarmText
+        } else {
+            $row.DefaultCellStyle.BackColor = $script:Theme.Accent
+            $row.DefaultCellStyle.ForeColor = $script:Theme.DarkText
         }
     }
 
-    $buttons = [Windows.Forms.FlowLayoutPanel]::new()
-    $buttons.Dock = 'Bottom'
-    $buttons.Height = 54
-    $buttons.Padding = [Windows.Forms.Padding]::new(8, 4, 8, 4)
-    $buttons.FlowDirection = 'RightToLeft'
-    $dialog.Controls.Add($buttons)
+    $adapterGrid = [Windows.Forms.DataGridView]::new()
+    $adapterGrid.Dock = 'Fill'
+    $adapterGrid.ReadOnly = $true
+    $adapterGrid.AllowUserToAddRows = $false
+    $adapterGrid.AllowUserToDeleteRows = $false
+    $adapterGrid.AllowUserToResizeRows = $false
+    $adapterGrid.RowHeadersVisible = $false
+    $adapterGrid.SelectionMode = 'FullRowSelect'
+    $adapterGrid.MultiSelect = $false
+    $adapterGrid.AutoGenerateColumns = $false
+    Initialize-GridTheme -Grid $adapterGrid
+    $adapterTab.Controls.Add($adapterGrid)
+
+    foreach ($spec in @(
+        @('Status','状态',82),
+        @('Name','网卡名称',150),
+        @('Description','硬件 / 驱动描述',300),
+        @('IPv4','IPv4',210),
+        @('Gateway','默认网关',150),
+        @('Guid','硬件 GUID',260)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'Guid') { $column.AutoSizeMode = 'Fill' }
+        [void]$adapterGrid.Columns.Add($column)
+    }
+
+    foreach ($adapter in $discovery.Adapters) {
+        $defaultForAdapter = @($discovery.DefaultRoutes | Where-Object InterfaceIndex -eq ([int]$adapter.Index))
+        $gatewayText = if ($defaultForAdapter.Count -gt 0) {
+            ($defaultForAdapter | ForEach-Object Gateway) -join ' / '
+        } else { '—' }
+        $rowIndex = $adapterGrid.Rows.Add(
+            [string]$adapter.Status,
+            [string]$adapter.Name,
+            [string]$adapter.Description,
+            (@($adapter.IPv4) -join ' / '),
+            $gatewayText,
+            [string]$adapter.Guid
+        )
+        if ([string]$adapter.Status -eq 'Up') {
+            $adapterGrid.Rows[$rowIndex].DefaultCellStyle.ForeColor = $script:Theme.Accent
+        }
+    }
+
+    $proxyGrid = [Windows.Forms.DataGridView]::new()
+    $proxyGrid.Dock = 'Fill'
+    $proxyGrid.ReadOnly = $true
+    $proxyGrid.AllowUserToAddRows = $false
+    $proxyGrid.AllowUserToDeleteRows = $false
+    $proxyGrid.AllowUserToResizeRows = $false
+    $proxyGrid.RowHeadersVisible = $false
+    $proxyGrid.SelectionMode = 'FullRowSelect'
+    $proxyGrid.MultiSelect = $false
+    $proxyGrid.AutoGenerateColumns = $false
+    Initialize-GridTheme -Grid $proxyGrid
+    $proxyTab.Controls.Add($proxyGrid)
+
+    foreach ($spec in @(
+        @('Token','代理绕过项',360),
+        @('Type','可作为 IPv4 规则',150),
+        @('Managed','管理状态',130),
+        @('RuleId','匹配规则 ID',320)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'RuleId') { $column.AutoSizeMode = 'Fill' }
+        [void]$proxyGrid.Columns.Add($column)
+    }
+
+    foreach ($proxy in $discovery.ProxyBypass) {
+        $rowIndex = $proxyGrid.Rows.Add(
+            [string]$proxy.Token,
+            $(if ($proxy.Actionable) { '是' } else { '否' }),
+            $(if ($proxy.Managed) { '已匹配' } else { '未管理' }),
+            [string]$proxy.RuleId
+        )
+        if ($proxy.Actionable -and -not $proxy.Managed) {
+            $proxyGrid.Rows[$rowIndex].DefaultCellStyle.BackColor = $script:Theme.Accent
+            $proxyGrid.Rows[$rowIndex].DefaultCellStyle.ForeColor = $script:Theme.DarkText
+        }
+    }
 
     $closeButton = New-UiButton -Text '关闭' -Width 88
-    $importButton = New-UiButton -Text '导入所选' -Width 100
-    $adoptButton = New-UiButton -Text '导入并接管' -Width 112
+    $importButton = New-UiButton -Text '仅导入规则' -Width 108 -Variant 'Accent'
+    $adoptButton = New-UiButton -Text '导入并接管' -Width 112 -Variant 'Primary'
     $buttons.Controls.Add($closeButton)
     $buttons.Controls.Add($adoptButton)
     $buttons.Controls.Add($importButton)
@@ -1085,7 +1248,7 @@ function Show-DiscoveryDialog {
     $importRoute = {
         param([bool]$TakeOwnership)
         if ($grid.SelectedRows.Count -eq 0) {
-            [Windows.Forms.MessageBox]::Show('请先选择一条已识别的特定目标路由。', '提示', 'OK', 'Information') | Out-Null
+            [Windows.Forms.MessageBox]::Show('请先在“特定路由”页选择一条路由。', '提示', 'OK', 'Information') | Out-Null
             return
         }
         $route = $grid.SelectedRows[0].Tag
@@ -1102,7 +1265,7 @@ function Show-DiscoveryDialog {
         $bypass = ([string]$route.Destination).EndsWith('/32') -and $proxyToken -in @(Get-ProxyTokens)
         $newRule = [pscustomobject]@{
             Id = [Guid]::NewGuid().ToString('N')
-            Name = "自动识别 - $($route.Destination)"
+            Name = "识别导入 - $($route.Destination)"
             Destination = [string]$route.Destination
             AdapterGuid = [string]$adapter[0].Guid
             AdapterDescription = [string]$adapter[0].Description
@@ -1120,7 +1283,11 @@ function Show-DiscoveryDialog {
             Save-Rules
             Write-AppLog -Message "从当前系统导入规则：$($newRule.Name)；接管=$TakeOwnership"
             [Windows.Forms.MessageBox]::Show(
-                $(if ($TakeOwnership) { '已导入并标记为由本程序接管。以后撤销该规则时会删除对应路由。' } else { '已导入为规则，但不接管已有路由。' }),
+                $(if ($TakeOwnership) {
+                    '已导入并接管。以后撤销此规则时，本程序可以删除对应路由。'
+                } else {
+                    '已导入为规则，但保留为外部已有策略；撤销规则不会主动删除原有路由。'
+                }),
                 '导入完成', 'OK', 'Information') | Out-Null
             $dialog.Close()
             Refresh-Grid
@@ -1133,8 +1300,8 @@ function Show-DiscoveryDialog {
     $importButton.Add_Click({ & $importRoute $false })
     $adoptButton.Add_Click({
         $answer = [Windows.Forms.MessageBox]::Show(
-            '接管后，本程序会认为该已有路由属于自己管理；以后点击“撤销”时可以删除它。确定接管吗？',
-            '确认接管', 'YesNo', 'Warning')
+            '接管意味着本程序取得该已有路由的管理权；以后撤销规则时可以删除它。确定继续吗？',
+            '确认接管现有策略', 'YesNo', 'Warning')
         if ($answer -eq 'Yes') { & $importRoute $true }
     })
 
