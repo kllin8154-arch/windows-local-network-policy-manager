@@ -22,8 +22,12 @@ Push-Location $root
 try {
     & npm.cmd install
     if ($LASTEXITCODE -ne 0) { throw 'npm install 执行失败。' }
-    Write-Host 'MCP 依赖安装完成。' -ForegroundColor Green
-    Write-Host "测试命令：Set-Location '$root'; npm run start"
+
+    & npm.cmd run check
+    if ($LASTEXITCODE -ne 0) { throw 'MCP TypeScript 类型检查失败。' }
+
+    Write-Host 'MCP 依赖安装与类型检查完成。' -ForegroundColor Green
+    Write-Host "启动命令：Set-Location '$root'; npm run start"
 } finally {
     Pop-Location
 }
