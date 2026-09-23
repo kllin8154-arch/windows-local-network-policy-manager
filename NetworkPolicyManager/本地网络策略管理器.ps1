@@ -1311,63 +1311,84 @@ function Show-DiscoveryDialog {
 $form = [Windows.Forms.Form]::new()
 $form.Text = '本地网络策略管理器'
 $form.StartPosition = 'CenterScreen'
-$form.Size = [Drawing.Size]::new(1240, 780)
-$form.MinimumSize = [Drawing.Size]::new(1020, 650)
+$form.Size = [Drawing.Size]::new(1320, 820)
+$form.MinimumSize = [Drawing.Size]::new(1080, 680)
 $form.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
 $form.AutoScaleMode = 'Dpi'
+$form.BackColor = $script:Theme.Background
+$form.ForeColor = $script:Theme.WarmText
 
 $header = [Windows.Forms.Panel]::new()
 $header.Dock = 'Top'
-$header.Height = 86
-$header.BackColor = [Drawing.Color]::FromArgb(245, 248, 252)
+$header.Height = 100
+$header.BackColor = $script:Theme.Background
 $form.Controls.Add($header)
+
+$accentStrip = [Windows.Forms.Panel]::new()
+$accentStrip.BackColor = $script:Theme.AccentStrong
+$accentStrip.Location = [Drawing.Point]::new(18, 17)
+$accentStrip.Size = [Drawing.Size]::new(6, 66)
+$header.Controls.Add($accentStrip)
+
+$eyebrowLabel = [Windows.Forms.Label]::new()
+$eyebrowLabel.Text = 'LOCAL NETWORK POLICY'
+$eyebrowLabel.Font = [Drawing.Font]::new('Segoe UI', 8, [Drawing.FontStyle]::Bold)
+$eyebrowLabel.ForeColor = $script:Theme.AccentStrong
+$eyebrowLabel.AutoSize = $true
+$eyebrowLabel.Location = [Drawing.Point]::new(36, 13)
+$header.Controls.Add($eyebrowLabel)
 
 $titleLabel = [Windows.Forms.Label]::new()
 $titleLabel.Text = '本地网络策略管理器'
-$titleLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 18, [Drawing.FontStyle]::Bold)
+$titleLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 19, [Drawing.FontStyle]::Bold)
+$titleLabel.ForeColor = $script:Theme.Accent
 $titleLabel.AutoSize = $true
-$titleLabel.Location = [Drawing.Point]::new(18, 12)
+$titleLabel.Location = [Drawing.Point]::new(34, 31)
 $header.Controls.Add($titleLabel)
 
 $descriptionLabel = [Windows.Forms.Label]::new()
-$descriptionLabel.Text = '按目标 IPv4/CIDR 指定出口网卡；不修改默认路由、IP、DHCP 或网卡跃点。'
-$descriptionLabel.ForeColor = [Drawing.Color]::FromArgb(75, 85, 99)
+$descriptionLabel.Text = '启动自动识别当前策略 · 精确 IPv4/CIDR 分流 · 不修改默认路由、IP、DHCP 或网卡跃点'
+$descriptionLabel.ForeColor = $script:Theme.MutedText
 $descriptionLabel.AutoSize = $true
-$descriptionLabel.Location = [Drawing.Point]::new(21, 50)
+$descriptionLabel.Location = [Drawing.Point]::new(37, 70)
 $header.Controls.Add($descriptionLabel)
 
 $summaryLabel = [Windows.Forms.Label]::new()
 $summaryLabel.Anchor = 'Top,Right'
 $summaryLabel.TextAlign = 'MiddleRight'
-$summaryLabel.Location = [Drawing.Point]::new(715, 13)
-$summaryLabel.Size = [Drawing.Size]::new(490, 52)
+$summaryLabel.ForeColor = $script:Theme.Accent
+$summaryLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
+$summaryLabel.Location = [Drawing.Point]::new(815, 20)
+$summaryLabel.Size = [Drawing.Size]::new(470, 58)
 $header.Controls.Add($summaryLabel)
 
 $toolbar = [Windows.Forms.FlowLayoutPanel]::new()
 $toolbar.Dock = 'Top'
-$toolbar.Height = 52
-$toolbar.Padding = [Windows.Forms.Padding]::new(10, 2, 8, 2)
+$toolbar.Height = 58
+$toolbar.Padding = [Windows.Forms.Padding]::new(12, 3, 8, 3)
 $toolbar.WrapContents = $false
+$toolbar.BackColor = $script:Theme.SurfaceAlt
 $form.Controls.Add($toolbar)
 
+$discoverButton = New-UiButton -Text '识别当前策略' -Width 118 -Variant 'Accent'
 $addButton = New-UiButton -Text '新增规则' -Width 96
 $editButton = New-UiButton -Text '修改规则' -Width 96
-$deleteButton = New-UiButton -Text '删除规则' -Width 96
-$applyButton = New-UiButton -Text '应用所选' -Width 96
-$applyAllButton = New-UiButton -Text '应用全部' -Width 96
-$removeButton = New-UiButton -Text '撤销所选' -Width 96
+$applyButton = New-UiButton -Text '应用所选' -Width 96 -Variant 'Primary'
+$applyAllButton = New-UiButton -Text '应用全部' -Width 96 -Variant 'Primary'
 $testButton = New-UiButton -Text '测试所选' -Width 96
 $refreshButton = New-UiButton -Text '刷新状态' -Width 96
-$discoverButton = New-UiButton -Text '识别当前策略' -Width 112
-@($addButton, $editButton, $deleteButton, $applyButton, $applyAllButton,
-    $removeButton, $testButton, $refreshButton, $discoverButton) | ForEach-Object { $toolbar.Controls.Add($_) }
+$removeButton = New-UiButton -Text '撤销所选' -Width 96 -Variant 'Danger'
+$deleteButton = New-UiButton -Text '删除规则' -Width 96 -Variant 'Danger'
+@($discoverButton, $addButton, $editButton, $applyButton, $applyAllButton,
+    $testButton, $refreshButton, $removeButton, $deleteButton) | ForEach-Object { $toolbar.Controls.Add($_) }
 
 $logBox = [Windows.Forms.RichTextBox]::new()
 $logBox.Dock = 'Bottom'
-$logBox.Height = 130
+$logBox.Height = 128
 $logBox.ReadOnly = $true
-$logBox.BackColor = [Drawing.Color]::FromArgb(250, 250, 250)
-$logBox.BorderStyle = 'FixedSingle'
+$logBox.BackColor = $script:Theme.SurfaceAlt
+$logBox.ForeColor = $script:Theme.Accent
+$logBox.BorderStyle = 'None'
 $logBox.Font = [Drawing.Font]::new('Consolas', 9)
 $form.Controls.Add($logBox)
 $script:LogControl = $logBox
@@ -1382,10 +1403,9 @@ $grid.MultiSelect = $false
 $grid.SelectionMode = 'FullRowSelect'
 $grid.RowHeadersVisible = $false
 $grid.AutoGenerateColumns = $false
-$grid.BackgroundColor = [Drawing.Color]::White
-$grid.BorderStyle = 'None'
 $grid.AutoSizeRowsMode = 'AllCells'
 $grid.DefaultCellStyle.WrapMode = 'False'
+Initialize-GridTheme -Grid $grid
 $form.Controls.Add($grid)
 
 function Add-GridColumn {
@@ -1412,10 +1432,11 @@ $layout.Dock = 'Fill'
 $layout.ColumnCount = 1
 $layout.RowCount = 4
 [void]$layout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100))
-[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 86))
-[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 52))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 100))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 58))
 [void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Percent', 100))
-[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 130))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 128))
+$layout.BackColor = $script:Theme.Background
 $form.Controls.Clear()
 $header.Dock = 'Fill'
 $toolbar.Dock = 'Fill'
@@ -1463,10 +1484,22 @@ function Refresh-Grid {
             $row = $grid.Rows[$rowIndex]
             $row.Tag = $rule
             switch ($status.Color) {
-                'Green' { $row.DefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(236, 253, 245) }
-                'Orange' { $row.DefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(255, 251, 235) }
-                'Red' { $row.DefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(254, 242, 242) }
-                default { $row.DefaultCellStyle.ForeColor = [Drawing.Color]::FromArgb(107, 114, 128) }
+                'Green' {
+                    $row.DefaultCellStyle.BackColor = $script:Theme.SurfaceAlt
+                    $row.DefaultCellStyle.ForeColor = $script:Theme.Accent
+                }
+                'Orange' {
+                    $row.DefaultCellStyle.BackColor = $script:Theme.Accent
+                    $row.DefaultCellStyle.ForeColor = $script:Theme.DarkText
+                }
+                'Red' {
+                    $row.DefaultCellStyle.BackColor = $script:Theme.AccentStrong
+                    $row.DefaultCellStyle.ForeColor = $script:Theme.WarmText
+                }
+                default {
+                    $row.DefaultCellStyle.BackColor = $script:Theme.Surface
+                    $row.DefaultCellStyle.ForeColor = $script:Theme.MutedText
+                }
             }
             if ([string]$rule.Id -eq $selectedId) { $row.Selected = $true }
         }
