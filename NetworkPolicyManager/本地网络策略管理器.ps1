@@ -1666,6 +1666,8 @@ $split = [Windows.Forms.SplitContainer]::new()
 $split.Dock = 'Fill'
 $split.Orientation = 'Vertical'
 $split.SplitterWidth = 5
+$split.Panel1MinSize = 650
+$split.Panel2MinSize = 330
 $split.SplitterDistance = 985
 $split.BackColor = $script:Theme.Border
 $split.Panel1.BackColor = $script:Theme.Background
@@ -2021,16 +2023,31 @@ function Restore-RulesFromFile {
     if ($dialog.ShowDialog($form) -ne 'OK') { return }
 
     $raw = Get-Content -LiteralPath $dialog.FileName -Raw -Encoding UTF8 | ConvertFrom-Json
-    $incoming = if ($null -ne $raw.Rules) { @($raw.Rules) } else { @($raw) }
+    $hasRulesProperty = $null -ne $raw -and $raw.PSObject.Properties.Name -contains 'Rules'
+    $incoming = if ($hasRulesProperty) { @($raw.Rules) } else { @($raw) }
     if ($incoming.Count -eq 0) {
         [Windows.Forms.MessageBox]::Show('备份中没有规则。', '无法导入', 'OK', 'Warning') | Out-Null
         return
     }
 
     $answer = [Windows.Forms.MessageBox]::Show(
-        "将导入 $($incoming.Count) 条规则定义。为避免跨机器误删已有路由，导入后会清除“接管已有路由/代理”的所有权标记；不会立即修改 Windows 网络。是否继续？",
-        '确认导入规则备份', 'YesNo', 'Question')
+        "备份包含 $($incoming.Count) 条规则，将替换当前 $($script:Rules.Count) 条规则定义。" +
+        [Environment]::NewLine +
+        '程序会先自动保存当前规则的安全备份；导入后会清除“接管已有路由/代理”的所有权标记，也不会立即修改 Windows 网络。是否继续？',
+        '确认替换当前规则', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
+
+    $safetyPath = Join-Path $script:AppRoot (
+        'network-rules-before-import-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'
+    )
+    [pscustomobject]@{
+        Format = 'windows-local-network-policy-manager/rules-backup'
+        Version = 1
+        ExportedAt = (Get-Date).ToString('o')
+        ComputerName = $env:COMPUTERNAME
+        Reason = 'automatic-backup-before-import'
+        Rules = @($script:Rules)
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $safetyPath -Encoding UTF8
 
     $normalized = foreach ($rule in $incoming) {
         [pscustomobject]@{
@@ -2053,7 +2070,12 @@ function Restore-RulesFromFile {
         $script:Rules = @($normalized)
         Assert-Configuration
         Save-Rules
-        Write-AppLog -Message "已从备份导入 $($script:Rules.Count) 条规则定义：$($dialog.FileName)"
+        Write-AppLog -Message "已从备份替换为 $($script:Rules.Count) 条规则定义：$($dialog.FileName)"
+        Write-AppLog -Message "导入前安全备份：$safetyPath"
+        [Windows.Forms.MessageBox]::Show(
+            "规则导入完成。" + [Environment]::NewLine +
+            "导入前的规则已自动备份到：" + [Environment]::NewLine + $safetyPath,
+            '导入完成', 'OK', 'Information') | Out-Null
         Refresh-Grid
     } catch {
         $script:Rules = $oldRules
