@@ -610,18 +610,56 @@ function Test-RulePolicy {
 
     $snapshot = Get-SystemSnapshot
     $status = Get-RuleStatus -Rule $Rule -Snapshot $snapshot
-    $parts = (ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)).Split('/')
+    $prefix = ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)
+    $parts = $prefix.Split('/')
     $testAddress = [string]$parts[0]
     $selected = Find-NetRoute -RemoteIPAddress $testAddress -ErrorAction SilentlyContinue |
         Where-Object { $_.PSObject.Properties.Name -contains 'DestinationPrefix' } |
         Select-Object -First 1
+
+    $adapter = $null
+    $expectedGateway = ''
+    try {
+        $adapter = Resolve-Adapter -Rule $Rule -Adapters $snapshot.Adapters
+        $expectedGateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $snapshot.Routes
+    } catch { }
+
+    $proxyToken = ''
+    $proxyPresent = $false
+    if ([bool]$Rule.BypassProxy) {
+        try {
+            $proxyToken = Get-ProxyTokenForRule -Rule $Rule
+            $proxyPresent = $proxyToken -in $snapshot.ProxyTokens
+        } catch { }
+    }
+
+    $state = Get-StateEntry -Id ([string]$Rule.Id)
+    $routeMatches = $null -ne $selected -and $null -ne $adapter -and
+        [int]$selected.InterfaceIndex -eq [int]$adapter.Index -and
+        [string]$selected.NextHop -eq [string]$expectedGateway
+    $healthy = $status.State -eq 'Applied' -and $routeMatches -and
+        (-not [bool]$Rule.BypassProxy -or $proxyPresent)
+
     [pscustomobject]@{
+        Id = [string]$Rule.Id
         Name = [string]$Rule.Name
-        Destination = [string]$Rule.Destination
+        Destination = $prefix
+        Healthy = [bool]$healthy
+        StatusCode = [string]$status.State
         Status = [string]$status.Text
+        ExpectedAdapter = if ($null -eq $adapter) { [string]$Rule.AdapterDescription } else { [string]$adapter.Name }
+        AdapterStatus = if ($null -eq $adapter) { 'Unavailable' } else { [string]$adapter.Status }
+        ExpectedGateway = [string]$expectedGateway
         SelectedAdapter = if ($null -eq $selected) { '无可用路由' } else { [string]$selected.InterfaceAlias }
         MatchedRoute = if ($null -eq $selected) { '' } else { [string]$selected.DestinationPrefix }
         NextHop = if ($null -eq $selected) { '' } else { [string]$selected.NextHop }
+        RouteMatches = [bool]$routeMatches
+        ProxyBypassExpected = [bool]$Rule.BypassProxy
+        ProxyBypassToken = [string]$proxyToken
+        ProxyBypassPresent = [bool]$proxyPresent
+        ManagedStatePresent = $null -ne $state
+        RouteOwned = $null -ne $state -and [bool]$state.RouteOwned
+        ProxyOwned = $null -ne $state -and [bool]$state.ProxyOwned
     }
 }
 
