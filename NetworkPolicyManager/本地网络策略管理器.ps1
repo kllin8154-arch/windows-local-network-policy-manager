@@ -2032,14 +2032,61 @@ function Edit-SelectedRule {
 
 $addButton.Add_Click({ Save-NewRule })
 $editButton.Add_Click({ Edit-SelectedRule })
-$grid.Add_CellDoubleClick({ param($sender, $eventArgs); if ($eventArgs.RowIndex -ge 0) { Edit-SelectedRule } })
+$grid.Add_CellDoubleClick({
+    param($sender, $eventArgs)
+    if ($eventArgs.RowIndex -ge 0) { Edit-SelectedRule }
+})
+$grid.Add_SelectionChanged({ Update-RuleDetail })
+
+$searchBox.Add_TextChanged({ Render-RuleGrid })
+$filterBox.Add_SelectedIndexChanged({ Render-RuleGrid })
+
+$backupButton.Add_Click({
+    try { Backup-RulesToFile } catch {
+        Write-AppLog -Message ("备份失败：" + $_.Exception.Message) -Level 'ERROR'
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, '备份失败', 'OK', 'Error') | Out-Null
+    }
+})
+
+$restoreButton.Add_Click({
+    try { Restore-RulesFromFile } catch {
+        Write-AppLog -Message ("导入备份失败：" + $_.Exception.Message) -Level 'ERROR'
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, '导入失败', 'OK', 'Error') | Out-Null
+    }
+})
+
+$copyDetailButton.Add_Click({
+    if (-not [string]::IsNullOrWhiteSpace($detailBox.Text)) {
+        [Windows.Forms.Clipboard]::SetText(
+            $detailNameLabel.Text + [Environment]::NewLine +
+            $detailStateLabel.Text + [Environment]::NewLine +
+            $detailBox.Text
+        )
+        Write-AppLog -Message "已复制规则详情：$($detailNameLabel.Text)"
+    }
+})
+
+$toggleLogButton.Add_Click({
+    $script:LogVisible = -not $script:LogVisible
+    if ($script:LogVisible) {
+        $layout.RowStyles[4].Height = 118
+        $toggleLogButton.Text = '隐藏日志'
+    } else {
+        $layout.RowStyles[4].Height = 0
+        $toggleLogButton.Text = '显示日志'
+    }
+})
+
+$pendingMetric.Panel.Cursor = [Windows.Forms.Cursors]::Hand
+$pendingMetric.Value.Cursor = [Windows.Forms.Cursors]::Hand
+$pendingMetric.Title.Cursor = [Windows.Forms.Cursors]::Hand
+$pendingMetric.Panel.Add_Click({ Show-DiscoveryDialog })
+$pendingMetric.Value.Add_Click({ Show-DiscoveryDialog })
+$pendingMetric.Title.Add_Click({ Show-DiscoveryDialog })
 
 $deleteButton.Add_Click({
     $rule = Get-SelectedRule
-    if ($null -eq $rule) {
-        [Windows.Forms.MessageBox]::Show('请先选择一条规则。', '提示', 'OK', 'Information') | Out-Null
-        return
-    }
+    if ($null -eq $rule) { return }
     $answer = [Windows.Forms.MessageBox]::Show(
         "将删除规则「$($rule.Name)」，并撤销它管理的精确路由和代理绕过。是否继续？",
         '确认删除', 'YesNo', 'Warning')
@@ -2058,10 +2105,7 @@ $deleteButton.Add_Click({
 
 $applyButton.Add_Click({
     $rule = Get-SelectedRule
-    if ($null -eq $rule) {
-        [Windows.Forms.MessageBox]::Show('请先选择一条规则。', '提示', 'OK', 'Information') | Out-Null
-        return
-    }
+    if ($null -eq $rule) { return }
     $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
     try {
         Apply-RulePolicy -Rule $rule
@@ -2078,34 +2122,46 @@ $applyAllButton.Add_Click({
     $enabledRules = @($script:Rules | Where-Object Enabled)
     if ($enabledRules.Count -eq 0) { return }
     $answer = [Windows.Forms.MessageBox]::Show(
-        "将应用 $($enabledRules.Count) 条启用规则。未连接或网关不匹配的规则会保留并报告错误。是否继续？",
+        "将应用 $($enabledRules.Count) 条启用规则。未连接、网关异常或存在冲突的规则会单独报告。是否继续？",
         '应用全部', 'YesNo', 'Question')
     if ($answer -ne 'Yes') { return }
+
     $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
     $errors = [Collections.Generic.List[string]]::new()
-    foreach ($rule in $enabledRules) {
-        try { Apply-RulePolicy -Rule $rule } catch {
-            $message = "$($rule.Name)：$($_.Exception.Message)"
-            $errors.Add($message)
-            Write-AppLog -Message $message -Level 'ERROR'
+    $success = 0
+    try {
+        foreach ($rule in $enabledRules) {
+            try {
+                Apply-RulePolicy -Rule $rule
+                $success++
+            } catch {
+                $message = "$($rule.Name)：$($_.Exception.Message)"
+                $errors.Add($message)
+                Write-AppLog -Message $message -Level 'ERROR'
+            }
         }
+        Refresh-Grid
+    } finally {
+        $form.Cursor = [Windows.Forms.Cursors]::Default
     }
-    Refresh-Grid
-    $form.Cursor = [Windows.Forms.Cursors]::Default
+
     if ($errors.Count -gt 0) {
         [Windows.Forms.MessageBox]::Show(
-            "部分规则未应用：`n`n$($errors -join "`n`n")", '应用完成（有错误）', 'OK', 'Warning') | Out-Null
+            "成功 $success 条，失败 $($errors.Count) 条。" + [Environment]::NewLine + [Environment]::NewLine +
+            ($errors -join ([Environment]::NewLine + [Environment]::NewLine)),
+            '应用完成（部分失败）', 'OK', 'Warning') | Out-Null
+    } else {
+        [Windows.Forms.MessageBox]::Show(
+            "已成功应用 $success 条规则。",
+            '应用完成', 'OK', 'Information') | Out-Null
     }
 })
 
 $removeButton.Add_Click({
     $rule = Get-SelectedRule
-    if ($null -eq $rule) {
-        [Windows.Forms.MessageBox]::Show('请先选择一条规则。', '提示', 'OK', 'Information') | Out-Null
-        return
-    }
+    if ($null -eq $rule) { return }
     $answer = [Windows.Forms.MessageBox]::Show(
-        "只撤销规则「$($rule.Name)」当前管理的路由和代理绕过，保留规则记录。是否继续？",
+        "只撤销规则「$($rule.Name)」当前由本程序管理的路由和代理绕过，保留规则定义。是否继续？",
         '确认撤销', 'YesNo', 'Question')
     if ($answer -ne 'Yes') { return }
     try {
@@ -2119,28 +2175,71 @@ $removeButton.Add_Click({
 
 $testButton.Add_Click({
     $rule = Get-SelectedRule
-    if ($null -eq $rule) {
-        [Windows.Forms.MessageBox]::Show('请先选择一条规则。', '提示', 'OK', 'Information') | Out-Null
-        return
-    }
+    if ($null -eq $rule) { return }
     try {
         $result = Test-RulePolicy -Rule $rule
         $message = @(
             "规则：$($result.Name)",
             "目标：$($result.Destination)",
-            "状态：$($result.Status)",
-            "Windows 实际选择网卡：$($result.SelectedAdapter)",
+            "健康状态：$(if ($result.Healthy) { '正常' } else { '需要检查' })",
+            "规则状态：$($result.Status)",
+            "",
+            "期望网卡：$($result.ExpectedAdapter)  [$($result.AdapterStatus)]",
+            "期望网关：$($result.ExpectedGateway)",
+            "实际网卡：$($result.SelectedAdapter)",
             "匹配路由：$($result.MatchedRoute)",
-            "下一跳：$($result.NextHop)"
-        ) -join "`n"
-        [Windows.Forms.MessageBox]::Show($message, '规则测试结果', 'OK', 'Information') | Out-Null
+            "实际下一跳：$($result.NextHop)",
+            "选路符合预期：$(if ($result.RouteMatches) { '是' } else { '否' })",
+            "",
+            "代理绕过要求：$(if ($result.ProxyBypassExpected) { '是' } else { '否' })",
+            "代理绕过存在：$(if (-not $result.ProxyBypassExpected) { '不适用' } elseif ($result.ProxyBypassPresent) { '是' } else { '否' })",
+            "管理状态记录：$(if ($result.ManagedStatePresent) { '存在' } else { '不存在' })",
+            "路由所有权：$(if ($result.RouteOwned) { '本程序拥有' } else { '未接管' })"
+        ) -join [Environment]::NewLine
+        [Windows.Forms.MessageBox]::Show($message, '规则诊断', 'OK', 'Information') | Out-Null
     } catch {
-        [Windows.Forms.MessageBox]::Show($_.Exception.Message, '测试失败', 'OK', 'Error') | Out-Null
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, '诊断失败', 'OK', 'Error') | Out-Null
     }
 })
 
 $refreshButton.Add_Click({ Refresh-Grid })
 $discoverButton.Add_Click({ Show-DiscoveryDialog })
+
+$form.Add_KeyDown({
+    param($sender, $eventArgs)
+    if ($eventArgs.KeyCode -eq 'F5') {
+        Refresh-Grid
+        $eventArgs.Handled = $true
+    } elseif ($eventArgs.Control -and $eventArgs.KeyCode -eq 'F') {
+        $searchBox.Focus()
+        $searchBox.SelectAll()
+        $eventArgs.Handled = $true
+    } elseif ($eventArgs.Control -and $eventArgs.KeyCode -eq 'N') {
+        Save-NewRule
+        $eventArgs.Handled = $true
+    } elseif ($eventArgs.Control -and $eventArgs.KeyCode -eq 'D') {
+        Show-DiscoveryDialog
+        $eventArgs.Handled = $true
+    }
+})
+
+$script:RefreshTimer = [Windows.Forms.Timer]::new()
+$script:RefreshTimer.Interval = 15000
+$script:RefreshTimer.Add_Tick({
+    if ($autoRefreshCheck.Checked -and $form.Visible -and -not $form.IsDisposed) {
+        Refresh-Grid
+    }
+})
+$script:RefreshTimer.Start()
+
+$toolTip = [Windows.Forms.ToolTip]::new()
+$toolTip.SetToolTip($discoverButton, '重新扫描当前 Windows 网卡、路由和代理绕过（Ctrl+D）')
+$toolTip.SetToolTip($refreshButton, '刷新规则实际状态（F5）')
+$toolTip.SetToolTip($searchBox, '按规则名称、目标地址、网卡、网关或状态搜索（Ctrl+F）')
+$toolTip.SetToolTip($backupButton, '导出规则定义备份，不包含系统路由状态')
+$toolTip.SetToolTip($restoreButton, '导入规则备份；不会立即修改 Windows 网络')
+$toolTip.SetToolTip($applyButton, '应用当前规则到 Windows')
+$toolTip.SetToolTip($testButton, '只读诊断 Windows 实际选路和代理状态')
 
 $isAdministrator = Test-IsAdministrator
 if (-not $isAdministrator) {
