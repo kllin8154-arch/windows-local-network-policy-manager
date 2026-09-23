@@ -1349,23 +1349,22 @@ function Show-DiscoveryDialog {
 $form = [Windows.Forms.Form]::new()
 $form.Text = '本地网络策略管理器'
 $form.StartPosition = 'CenterScreen'
-$form.Size = [Drawing.Size]::new(1320, 820)
-$form.MinimumSize = [Drawing.Size]::new(1080, 680)
+$form.Size = [Drawing.Size]::new(1380, 860)
+$form.MinimumSize = [Drawing.Size]::new(1120, 700)
 $form.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
 $form.AutoScaleMode = 'Dpi'
 $form.BackColor = $script:Theme.Background
 $form.ForeColor = $script:Theme.WarmText
+$form.KeyPreview = $true
 
 $header = [Windows.Forms.Panel]::new()
-$header.Dock = 'Top'
-$header.Height = 100
+$header.Dock = 'Fill'
 $header.BackColor = $script:Theme.Background
-$form.Controls.Add($header)
 
 $accentStrip = [Windows.Forms.Panel]::new()
 $accentStrip.BackColor = $script:Theme.AccentStrong
 $accentStrip.Location = [Drawing.Point]::new(18, 17)
-$accentStrip.Size = [Drawing.Size]::new(6, 66)
+$accentStrip.Size = [Drawing.Size]::new(6, 68)
 $header.Controls.Add($accentStrip)
 
 $eyebrowLabel = [Windows.Forms.Label]::new()
@@ -1385,10 +1384,10 @@ $titleLabel.Location = [Drawing.Point]::new(34, 31)
 $header.Controls.Add($titleLabel)
 
 $descriptionLabel = [Windows.Forms.Label]::new()
-$descriptionLabel.Text = '启动自动识别当前策略 · 精确 IPv4/CIDR 分流 · 不修改默认路由、IP、DHCP 或网卡跃点'
+$descriptionLabel.Text = '自动识别当前网络 · 精确 IPv4/CIDR 分流 · 先看清现状，再决定是否接管'
 $descriptionLabel.ForeColor = $script:Theme.MutedText
 $descriptionLabel.AutoSize = $true
-$descriptionLabel.Location = [Drawing.Point]::new(37, 70)
+$descriptionLabel.Location = [Drawing.Point]::new(37, 72)
 $header.Controls.Add($descriptionLabel)
 
 $summaryLabel = [Windows.Forms.Label]::new()
@@ -1396,40 +1395,97 @@ $summaryLabel.Anchor = 'Top,Right'
 $summaryLabel.TextAlign = 'MiddleRight'
 $summaryLabel.ForeColor = $script:Theme.Accent
 $summaryLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
-$summaryLabel.Location = [Drawing.Point]::new(815, 20)
-$summaryLabel.Size = [Drawing.Size]::new(470, 58)
+$summaryLabel.Location = [Drawing.Point]::new(855, 21)
+$summaryLabel.Size = [Drawing.Size]::new(490, 58)
 $header.Controls.Add($summaryLabel)
 
+function New-MetricCard {
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string]$Value,
+        [int]$Width = 305
+    )
+    $panel = [Windows.Forms.Panel]::new()
+    $panel.Width = $Width
+    $panel.Height = 68
+    $panel.Margin = [Windows.Forms.Padding]::new(7, 7, 7, 5)
+    $panel.BackColor = $script:Theme.SurfaceAlt
+
+    $titleLabel = [Windows.Forms.Label]::new()
+    $titleLabel.Text = $Title
+    $titleLabel.ForeColor = $script:Theme.MutedText
+    $titleLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 8, [Drawing.FontStyle]::Bold)
+    $titleLabel.AutoSize = $true
+    $titleLabel.Location = [Drawing.Point]::new(14, 10)
+    $panel.Controls.Add($titleLabel)
+
+    $valueLabel = [Windows.Forms.Label]::new()
+    $valueLabel.Text = $Value
+    $valueLabel.ForeColor = $script:Theme.Accent
+    $valueLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 11, [Drawing.FontStyle]::Bold)
+    $valueLabel.AutoEllipsis = $true
+    $valueLabel.Location = [Drawing.Point]::new(13, 31)
+    $valueLabel.Size = [Drawing.Size]::new($Width - 26, 25)
+    $panel.Controls.Add($valueLabel)
+
+    [pscustomobject]@{ Panel = $panel; Value = $valueLabel; Title = $titleLabel }
+}
+
+$metrics = [Windows.Forms.FlowLayoutPanel]::new()
+$metrics.Dock = 'Fill'
+$metrics.WrapContents = $false
+$metrics.Padding = [Windows.Forms.Padding]::new(7, 0, 7, 0)
+$metrics.BackColor = $script:Theme.Background
+
+$ruleMetric = New-MetricCard -Title '规则状态' -Value '正在读取…'
+$adapterMetric = New-MetricCard -Title '已连接实体网卡' -Value '正在识别…'
+$routeMetric = New-MetricCard -Title '当前默认出口' -Value '正在识别…'
+$pendingMetric = New-MetricCard -Title '待处理现有策略' -Value '正在识别…'
+@($ruleMetric, $adapterMetric, $routeMetric, $pendingMetric) | ForEach-Object {
+    [void]$metrics.Controls.Add($_.Panel)
+}
+
 $toolbar = [Windows.Forms.FlowLayoutPanel]::new()
-$toolbar.Dock = 'Top'
-$toolbar.Height = 58
-$toolbar.Padding = [Windows.Forms.Padding]::new(12, 3, 8, 3)
+$toolbar.Dock = 'Fill'
+$toolbar.Height = 60
+$toolbar.Padding = [Windows.Forms.Padding]::new(12, 4, 8, 4)
 $toolbar.WrapContents = $false
 $toolbar.BackColor = $script:Theme.SurfaceAlt
-$form.Controls.Add($toolbar)
 
 $discoverButton = New-UiButton -Text '识别当前策略' -Width 118 -Variant 'Accent'
-$addButton = New-UiButton -Text '新增规则' -Width 96
-$editButton = New-UiButton -Text '修改规则' -Width 96
-$applyButton = New-UiButton -Text '应用所选' -Width 96 -Variant 'Primary'
-$applyAllButton = New-UiButton -Text '应用全部' -Width 96 -Variant 'Primary'
-$testButton = New-UiButton -Text '测试所选' -Width 96
-$refreshButton = New-UiButton -Text '刷新状态' -Width 96
-$removeButton = New-UiButton -Text '撤销所选' -Width 96 -Variant 'Danger'
-$deleteButton = New-UiButton -Text '删除规则' -Width 96 -Variant 'Danger'
-@($discoverButton, $addButton, $editButton, $applyButton, $applyAllButton,
-    $testButton, $refreshButton, $removeButton, $deleteButton) | ForEach-Object { $toolbar.Controls.Add($_) }
+$addButton = New-UiButton -Text '新增规则' -Width 92
+$applyAllButton = New-UiButton -Text '应用全部' -Width 92 -Variant 'Primary'
+$refreshButton = New-UiButton -Text '刷新' -Width 78
+$backupButton = New-UiButton -Text '备份规则' -Width 92
+$restoreButton = New-UiButton -Text '导入备份' -Width 92
 
-$logBox = [Windows.Forms.RichTextBox]::new()
-$logBox.Dock = 'Bottom'
-$logBox.Height = 128
-$logBox.ReadOnly = $true
-$logBox.BackColor = $script:Theme.SurfaceAlt
-$logBox.ForeColor = $script:Theme.Accent
-$logBox.BorderStyle = 'None'
-$logBox.Font = [Drawing.Font]::new('Consolas', 9)
-$form.Controls.Add($logBox)
-$script:LogControl = $logBox
+@($discoverButton, $addButton, $applyAllButton, $refreshButton, $backupButton, $restoreButton) |
+    ForEach-Object { [void]$toolbar.Controls.Add($_) }
+
+$searchLabel = [Windows.Forms.Label]::new()
+$searchLabel.Text = '搜索'
+$searchLabel.AutoSize = $true
+$searchLabel.ForeColor = $script:Theme.MutedText
+$searchLabel.Margin = [Windows.Forms.Padding]::new(16, 14, 4, 0)
+$toolbar.Controls.Add($searchLabel)
+
+$searchBox = [Windows.Forms.TextBox]::new()
+$searchBox.Width = 200
+$searchBox.Height = 26
+$searchBox.Margin = [Windows.Forms.Padding]::new(4, 10, 4, 0)
+Set-UiInputTheme -Control $searchBox
+$toolbar.Controls.Add($searchBox)
+
+$filterBox = [Windows.Forms.ComboBox]::new()
+$filterBox.Width = 135
+$filterBox.DropDownStyle = 'DropDownList'
+$filterBox.Margin = [Windows.Forms.Padding]::new(8, 10, 4, 0)
+Set-UiInputTheme -Control $filterBox
+@('全部状态', '已应用', '未应用', '异常 / 冲突', '已禁用') | ForEach-Object {
+    [void]$filterBox.Items.Add($_)
+}
+$filterBox.SelectedIndex = 0
+$toolbar.Controls.Add($filterBox)
 
 $grid = [Windows.Forms.DataGridView]::new()
 $grid.Dock = 'Fill'
@@ -1444,7 +1500,6 @@ $grid.AutoGenerateColumns = $false
 $grid.AutoSizeRowsMode = 'AllCells'
 $grid.DefaultCellStyle.WrapMode = 'False'
 Initialize-GridTheme -Grid $grid
-$form.Controls.Add($grid)
 
 function Add-GridColumn {
     param([string]$Name, [string]$Header, [int]$Width, [string]$AutoSizeMode = 'None')
@@ -1456,72 +1511,314 @@ function Add-GridColumn {
     [void]$grid.Columns.Add($column)
 }
 
-Add-GridColumn -Name 'Enabled' -Header '启用' -Width 55
-Add-GridColumn -Name 'Name' -Header '名称' -Width 245
-Add-GridColumn -Name 'Destination' -Header '目标 IPv4 / CIDR' -Width 150
-Add-GridColumn -Name 'Adapter' -Header '指定网卡' -Width 150
-Add-GridColumn -Name 'Gateway' -Header '网关' -Width 145
-Add-GridColumn -Name 'Proxy' -Header '绕过代理' -Width 82
-Add-GridColumn -Name 'Status' -Header '当前状态' -Width 210
-Add-GridColumn -Name 'Actual' -Header '实际路由' -Width 160 -AutoSizeMode 'Fill'
+Add-GridColumn -Name 'Enabled' -Header '启用' -Width 52
+Add-GridColumn -Name 'Name' -Header '规则' -Width 220
+Add-GridColumn -Name 'Destination' -Header '目标 IPv4 / CIDR' -Width 145
+Add-GridColumn -Name 'Adapter' -Header '指定网卡' -Width 145
+Add-GridColumn -Name 'Gateway' -Header '网关' -Width 135
+Add-GridColumn -Name 'Proxy' -Header '代理' -Width 58
+Add-GridColumn -Name 'Status' -Header '当前状态' -Width 190
+Add-GridColumn -Name 'Actual' -Header '实际路由' -Width 150 -AutoSizeMode 'Fill'
+
+$detailPanel = [Windows.Forms.Panel]::new()
+$detailPanel.Dock = 'Fill'
+$detailPanel.BackColor = $script:Theme.SurfaceAlt
+$detailPanel.Padding = [Windows.Forms.Padding]::new(16)
+
+$detailTitle = [Windows.Forms.Label]::new()
+$detailTitle.Text = 'RULE DETAIL'
+$detailTitle.Font = [Drawing.Font]::new('Segoe UI', 8, [Drawing.FontStyle]::Bold)
+$detailTitle.ForeColor = $script:Theme.AccentStrong
+$detailTitle.AutoSize = $true
+$detailTitle.Location = [Drawing.Point]::new(16, 14)
+$detailPanel.Controls.Add($detailTitle)
+
+$detailNameLabel = [Windows.Forms.Label]::new()
+$detailNameLabel.Text = '选择一条规则'
+$detailNameLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 14, [Drawing.FontStyle]::Bold)
+$detailNameLabel.ForeColor = $script:Theme.Accent
+$detailNameLabel.AutoEllipsis = $true
+$detailNameLabel.Location = [Drawing.Point]::new(15, 36)
+$detailNameLabel.Size = [Drawing.Size]::new(315, 30)
+$detailPanel.Controls.Add($detailNameLabel)
+
+$detailStateLabel = [Windows.Forms.Label]::new()
+$detailStateLabel.Text = '—'
+$detailStateLabel.TextAlign = 'MiddleCenter'
+$detailStateLabel.BackColor = $script:Theme.Background
+$detailStateLabel.ForeColor = $script:Theme.MutedText
+$detailStateLabel.Location = [Drawing.Point]::new(16, 73)
+$detailStateLabel.Size = [Drawing.Size]::new(150, 26)
+$detailPanel.Controls.Add($detailStateLabel)
+
+$detailBox = [Windows.Forms.RichTextBox]::new()
+$detailBox.ReadOnly = $true
+$detailBox.BorderStyle = 'None'
+$detailBox.BackColor = $script:Theme.SurfaceAlt
+$detailBox.ForeColor = $script:Theme.WarmText
+$detailBox.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+$detailBox.Location = [Drawing.Point]::new(16, 112)
+$detailBox.Anchor = 'Top,Bottom,Left,Right'
+$detailBox.Size = [Drawing.Size]::new(320, 260)
+$detailBox.Text = "选择左侧规则后，这里会显示期望出口、当前状态和所有权信息。"
+$detailPanel.Controls.Add($detailBox)
+
+$detailActions = [Windows.Forms.FlowLayoutPanel]::new()
+$detailActions.Dock = 'Bottom'
+$detailActions.Height = 116
+$detailActions.Padding = [Windows.Forms.Padding]::new(0, 6, 0, 0)
+$detailActions.WrapContents = $true
+$detailActions.BackColor = $script:Theme.SurfaceAlt
+$detailPanel.Controls.Add($detailActions)
+
+$applyButton = New-UiButton -Text '应用' -Width 150 -Variant 'Primary'
+$testButton = New-UiButton -Text '诊断' -Width 150 -Variant 'Accent'
+$editButton = New-UiButton -Text '修改' -Width 150
+$copyDetailButton = New-UiButton -Text '复制详情' -Width 150
+$removeButton = New-UiButton -Text '撤销' -Width 150 -Variant 'Danger'
+$deleteButton = New-UiButton -Text '删除' -Width 150 -Variant 'Danger'
+@($applyButton, $testButton, $editButton, $copyDetailButton, $removeButton, $deleteButton) |
+    ForEach-Object { [void]$detailActions.Controls.Add($_) }
+
+$split = [Windows.Forms.SplitContainer]::new()
+$split.Dock = 'Fill'
+$split.Orientation = 'Vertical'
+$split.SplitterWidth = 5
+$split.SplitterDistance = 985
+$split.BackColor = $script:Theme.Border
+$split.Panel1.BackColor = $script:Theme.Background
+$split.Panel2.BackColor = $script:Theme.SurfaceAlt
+$split.Panel1.Controls.Add($grid)
+$split.Panel2.Controls.Add($detailPanel)
+
+$logPanel = [Windows.Forms.Panel]::new()
+$logPanel.Dock = 'Fill'
+$logPanel.BackColor = $script:Theme.SurfaceAlt
+
+$logTitle = [Windows.Forms.Label]::new()
+$logTitle.Text = '操作日志'
+$logTitle.Dock = 'Top'
+$logTitle.Height = 24
+$logTitle.Padding = [Windows.Forms.Padding]::new(12, 4, 0, 0)
+$logTitle.ForeColor = $script:Theme.MutedText
+$logTitle.Font = [Drawing.Font]::new('Microsoft YaHei UI', 8, [Drawing.FontStyle]::Bold)
+$logPanel.Controls.Add($logTitle)
+
+$logBox = [Windows.Forms.RichTextBox]::new()
+$logBox.Dock = 'Fill'
+$logBox.ReadOnly = $true
+$logBox.BackColor = $script:Theme.SurfaceAlt
+$logBox.ForeColor = $script:Theme.Accent
+$logBox.BorderStyle = 'None'
+$logBox.Font = [Drawing.Font]::new('Consolas', 9)
+$logPanel.Controls.Add($logBox)
+$logBox.BringToFront()
+$script:LogControl = $logBox
+
+$footer = [Windows.Forms.FlowLayoutPanel]::new()
+$footer.Dock = 'Fill'
+$footer.FlowDirection = 'LeftToRight'
+$footer.WrapContents = $false
+$footer.Padding = [Windows.Forms.Padding]::new(10, 3, 8, 0)
+$footer.BackColor = $script:Theme.Background
+
+$modeLabel = [Windows.Forms.Label]::new()
+$modeLabel.AutoSize = $true
+$modeLabel.ForeColor = $script:Theme.MutedText
+$modeLabel.Margin = [Windows.Forms.Padding]::new(0, 5, 18, 0)
+$footer.Controls.Add($modeLabel)
+
+$lastRefreshLabel = [Windows.Forms.Label]::new()
+$lastRefreshLabel.Text = '尚未刷新'
+$lastRefreshLabel.AutoSize = $true
+$lastRefreshLabel.ForeColor = $script:Theme.MutedText
+$lastRefreshLabel.Margin = [Windows.Forms.Padding]::new(0, 5, 18, 0)
+$footer.Controls.Add($lastRefreshLabel)
+
+$visibleCountLabel = [Windows.Forms.Label]::new()
+$visibleCountLabel.AutoSize = $true
+$visibleCountLabel.ForeColor = $script:Theme.MutedText
+$visibleCountLabel.Margin = [Windows.Forms.Padding]::new(0, 5, 18, 0)
+$footer.Controls.Add($visibleCountLabel)
+
+$autoRefreshCheck = [Windows.Forms.CheckBox]::new()
+$autoRefreshCheck.Text = '15 秒自动刷新'
+$autoRefreshCheck.Checked = $true
+$autoRefreshCheck.AutoSize = $true
+$autoRefreshCheck.ForeColor = $script:Theme.Accent
+$autoRefreshCheck.Margin = [Windows.Forms.Padding]::new(0, 3, 16, 0)
+$footer.Controls.Add($autoRefreshCheck)
+
+$toggleLogButton = [Windows.Forms.Button]::new()
+$toggleLogButton.Text = '隐藏日志'
+$toggleLogButton.AutoSize = $true
+$toggleLogButton.FlatStyle = 'Flat'
+$toggleLogButton.FlatAppearance.BorderSize = 0
+$toggleLogButton.BackColor = $script:Theme.Background
+$toggleLogButton.ForeColor = $script:Theme.Accent
+$toggleLogButton.Margin = [Windows.Forms.Padding]::new(0, 0, 0, 0)
+$footer.Controls.Add($toggleLogButton)
 
 $layout = [Windows.Forms.TableLayoutPanel]::new()
 $layout.Dock = 'Fill'
 $layout.ColumnCount = 1
-$layout.RowCount = 4
+$layout.RowCount = 6
 [void]$layout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100))
-[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 100))
-[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 58))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 104))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 82))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 60))
 [void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Percent', 100))
-[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 128))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 118))
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 30))
 $layout.BackColor = $script:Theme.Background
-$form.Controls.Clear()
-$header.Dock = 'Fill'
-$toolbar.Dock = 'Fill'
-$grid.Dock = 'Fill'
-$logBox.Dock = 'Fill'
 $layout.Controls.Add($header, 0, 0)
-$layout.Controls.Add($toolbar, 0, 1)
-$layout.Controls.Add($grid, 0, 2)
-$layout.Controls.Add($logBox, 0, 3)
+$layout.Controls.Add($metrics, 0, 1)
+$layout.Controls.Add($toolbar, 0, 2)
+$layout.Controls.Add($split, 0, 3)
+$layout.Controls.Add($logPanel, 0, 4)
+$layout.Controls.Add($footer, 0, 5)
 $form.Controls.Add($layout)
+
+$script:RuleViewCache = @()
+$script:LogVisible = $true
 
 function Get-SelectedRule {
     if ($grid.SelectedRows.Count -eq 0) { return $null }
     $grid.SelectedRows[0].Tag
 }
 
-function Refresh-Grid {
+function Set-SelectedActionState {
+    param([bool]$HasSelection)
+    $adminReady = $HasSelection -and (Test-IsAdministrator)
+    $editButton.Enabled = $adminReady
+    $applyButton.Enabled = $adminReady
+    $removeButton.Enabled = $adminReady
+    $deleteButton.Enabled = $adminReady
+    $testButton.Enabled = $HasSelection
+    $copyDetailButton.Enabled = $HasSelection
+}
+
+function Update-RuleDetail {
+    $rule = Get-SelectedRule
+    if ($null -eq $rule) {
+        $detailNameLabel.Text = '选择一条规则'
+        $detailStateLabel.Text = '—'
+        $detailStateLabel.BackColor = $script:Theme.Background
+        $detailStateLabel.ForeColor = $script:Theme.MutedText
+        $detailBox.Text = "选择左侧规则后，这里会显示期望出口、当前状态和所有权信息。"
+        Set-SelectedActionState -HasSelection $false
+        return
+    }
+
+    $item = @($script:RuleViewCache | Where-Object { $_.Rule.Id -eq $rule.Id } | Select-Object -First 1)
+    $status = if ($item.Count -gt 0) { $item[0].Status } else { $null }
+    $state = Get-StateEntry -Id ([string]$rule.Id)
+    $detailNameLabel.Text = [string]$rule.Name
+    $detailStateLabel.Text = if ($null -eq $status) { '未知' } else { [string]$status.Text }
+
+    if ($null -ne $status) {
+        switch ([string]$status.Color) {
+            'Green' {
+                $detailStateLabel.BackColor = $script:Theme.SurfaceAlt
+                $detailStateLabel.ForeColor = $script:Theme.Accent
+            }
+            'Orange' {
+                $detailStateLabel.BackColor = $script:Theme.Accent
+                $detailStateLabel.ForeColor = $script:Theme.DarkText
+            }
+            'Red' {
+                $detailStateLabel.BackColor = $script:Theme.AccentStrong
+                $detailStateLabel.ForeColor = $script:Theme.WarmText
+            }
+            default {
+                $detailStateLabel.BackColor = $script:Theme.Background
+                $detailStateLabel.ForeColor = $script:Theme.MutedText
+            }
+        }
+    }
+
+    $adapterText = if ($item.Count -gt 0) { [string]$item[0].AdapterName } else { [string]$rule.AdapterDescription }
+    $gatewayText = if ([string]$rule.GatewayMode -eq 'Manual') { [string]$rule.Gateway } else { '自动读取当前默认网关' }
+    $ownership = if ($null -ne $state -and [bool]$state.RouteOwned) {
+        '由本程序接管'
+    } elseif ([bool]$rule.OwnExistingRoute) {
+        '配置为接管已有路由'
+    } else {
+        '仅管理规则定义'
+    }
+    $actualText = if ($null -ne $status -and -not [string]::IsNullOrWhiteSpace([string]$status.Actual)) {
+        [string]$status.Actual
+    } else { '—' }
+
+    $detailBox.Text = @(
+        "目标        $($rule.Destination)",
+        "指定网卡    $adapterText",
+        "网关模式    $($rule.GatewayMode)",
+        "期望网关    $gatewayText",
+        "代理绕过    $(if ([bool]$rule.BypassProxy) { '是' } else { '否' })",
+        "当前实际    $actualText",
+        "",
+        "所有权      $ownership",
+        "规则 ID     $($rule.Id)",
+        "",
+        "双击规则可修改；“诊断”会检查 Windows 最终选路、代理绕过和管理状态。"
+    ) -join [Environment]::NewLine
+
+    Set-SelectedActionState -HasSelection $true
+}
+
+function Test-ItemMatchesFilter {
+    param([Parameter(Mandatory)]$Item)
+
+    $query = $searchBox.Text.Trim()
+    if (-not [string]::IsNullOrWhiteSpace($query)) {
+        $haystack = @(
+            [string]$Item.Rule.Name,
+            [string]$Item.Rule.Destination,
+            [string]$Item.AdapterName,
+            [string]$Item.GatewayText,
+            [string]$Item.Status.Text,
+            [string]$Item.Status.Actual
+        ) -join ' '
+        if ($haystack.IndexOf($query, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            return $false
+        }
+    }
+
+    switch ([string]$filterBox.SelectedItem) {
+        '已应用' { return $Item.Status.State -eq 'Applied' }
+        '未应用' { return $Item.Status.State -in @('Missing', 'ProxyMissing') }
+        '异常 / 冲突' { return $Item.Status.State -in @('Conflict', 'Unavailable') }
+        '已禁用' { return $Item.Status.State -eq 'Disabled' }
+        default { return $true }
+    }
+}
+
+function Render-RuleGrid {
     $selectedId = if ($grid.SelectedRows.Count -gt 0 -and $null -ne $grid.SelectedRows[0].Tag) {
         [string]$grid.SelectedRows[0].Tag.Id
     } else { '' }
-    $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+
+    $grid.SuspendLayout()
     try {
-        $snapshot = Get-SystemSnapshot
         $grid.Rows.Clear()
-        $applied = 0
-        foreach ($rule in $script:Rules) {
-            $status = Get-RuleStatus -Rule $rule -Snapshot $snapshot
-            if ($status.State -eq 'Applied') { $applied++ }
-            $adapter = $null
-            try { $adapter = Resolve-Adapter -Rule $rule -Adapters $snapshot.Adapters } catch { }
-            $adapterName = if ($null -eq $adapter) { [string]$rule.AdapterDescription } else { [string]$adapter.Name }
-            $gatewayText = if ([string]$rule.GatewayMode -eq 'Manual') {
-                [string]$rule.Gateway
-            } else { '自动（当前默认网关）' }
+        foreach ($item in $script:RuleViewCache) {
+            if (-not (Test-ItemMatchesFilter -Item $item)) { continue }
+            $rule = $item.Rule
+            $status = $item.Status
             $rowIndex = $grid.Rows.Add(
                 $(if ([bool]$rule.Enabled) { '是' } else { '否' }),
                 [string]$rule.Name,
                 [string]$rule.Destination,
-                $adapterName,
-                $gatewayText,
+                [string]$item.AdapterName,
+                [string]$item.GatewayText,
                 $(if ([bool]$rule.BypassProxy) { '是' } else { '否' }),
                 [string]$status.Text,
                 [string]$status.Actual
             )
             $row = $grid.Rows[$rowIndex]
             $row.Tag = $rule
-            switch ($status.Color) {
+            switch ([string]$status.Color) {
                 'Green' {
                     $row.DefaultCellStyle.BackColor = $script:Theme.SurfaceAlt
                     $row.DefaultCellStyle.ForeColor = $script:Theme.Accent
@@ -1539,16 +1836,138 @@ function Refresh-Grid {
                     $row.DefaultCellStyle.ForeColor = $script:Theme.MutedText
                 }
             }
-            if ([string]$rule.Id -eq $selectedId) { $row.Selected = $true }
+            if ([string]$rule.Id -eq $selectedId) {
+                $row.Selected = $true
+            }
         }
-        $upAdapters = @($snapshot.Adapters | Where-Object { $_.Hardware -and $_.Status -eq 'Up' } |
-            ForEach-Object Name)
-        $summaryLabel.Text = "已应用 $applied / $($script:Rules.Count) 条规则`n已连接实体网卡：$($upAdapters -join '、')"
+
+        if ($grid.SelectedRows.Count -eq 0 -and $grid.Rows.Count -gt 0) {
+            $grid.Rows[0].Selected = $true
+        }
+        $visibleCountLabel.Text = "显示 $($grid.Rows.Count) / $($script:Rules.Count) 条"
+    } finally {
+        $grid.ResumeLayout()
+    }
+    Update-RuleDetail
+}
+
+function Refresh-Grid {
+    $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+    try {
+        $snapshot = Get-SystemSnapshot
+        $cache = foreach ($rule in $script:Rules) {
+            $status = Get-RuleStatus -Rule $rule -Snapshot $snapshot
+            $adapter = $null
+            try { $adapter = Resolve-Adapter -Rule $rule -Adapters $snapshot.Adapters } catch { }
+            [pscustomobject]@{
+                Rule = $rule
+                Status = $status
+                AdapterName = if ($null -eq $adapter) { [string]$rule.AdapterDescription } else { [string]$adapter.Name }
+                GatewayText = if ([string]$rule.GatewayMode -eq 'Manual') {
+                    [string]$rule.Gateway
+                } else { '自动（当前默认网关）' }
+            }
+        }
+        $script:RuleViewCache = @($cache)
+
+        $applied = @($script:RuleViewCache | Where-Object { $_.Status.State -eq 'Applied' }).Count
+        $upAdapters = @($snapshot.Adapters | Where-Object { $_.Hardware -and $_.Status -eq 'Up' })
+        $defaults = @($snapshot.Routes | Where-Object {
+            $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0'
+        } | Sort-Object RouteMetric)
+
+        $discovery = Get-NetworkPolicyDiscovery
+        $pending = [int]$discovery.UnmanagedSpecificRouteCount + [int]$discovery.UnmanagedProxyBypassCount
+
+        $ruleMetric.Value.Text = "$applied / $($script:Rules.Count) 已应用"
+        $adapterMetric.Value.Text = if ($upAdapters.Count -eq 0) { '未检测到已连接实体网卡' } else {
+            ($upAdapters | ForEach-Object Name) -join ' · '
+        }
+        $routeMetric.Value.Text = if ($defaults.Count -eq 0) { '无 IPv4 默认出口' } else {
+            "$($defaults[0].InterfaceAlias) → $($defaults[0].NextHop)"
+        }
+        $pendingMetric.Value.Text = if ($pending -eq 0) { '0 · 当前已归档' } else { "$pending 条 · 点击“识别当前策略”处理" }
+        $pendingMetric.Panel.BackColor = if ($pending -gt 0) { $script:Theme.Accent } else { $script:Theme.SurfaceAlt }
+        $pendingMetric.Value.ForeColor = if ($pending -gt 0) { $script:Theme.DarkText } else { $script:Theme.Accent }
+        $pendingMetric.Title.ForeColor = if ($pending -gt 0) { $script:Theme.DarkText } else { $script:Theme.MutedText }
+
+        $summaryLabel.Text = if ($pending -gt 0) {
+            '已自动识别当前网络' + [Environment]::NewLine + "发现 $pending 条未纳入管理的现有策略"
+        } else {
+            '已自动识别当前网络' + [Environment]::NewLine + '当前没有待处理的现有策略'
+        }
+        $lastRefreshLabel.Text = "最后刷新 $(Get-Date -Format 'HH:mm:ss')"
+        Render-RuleGrid
     } catch {
         Write-AppLog -Message ("刷新失败：" + $_.Exception.Message) -Level 'ERROR'
         $summaryLabel.Text = '状态刷新失败'
     } finally {
         $form.Cursor = [Windows.Forms.Cursors]::Default
+    }
+}
+
+function Backup-RulesToFile {
+    $dialog = [Windows.Forms.SaveFileDialog]::new()
+    $dialog.Title = '备份网络策略规则'
+    $dialog.Filter = 'JSON 文件 (*.json)|*.json'
+    $dialog.FileName = 'network-rules-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'
+    if ($dialog.ShowDialog($form) -ne 'OK') { return }
+
+    $bundle = [pscustomobject]@{
+        Format = 'windows-local-network-policy-manager/rules-backup'
+        Version = 1
+        ExportedAt = (Get-Date).ToString('o')
+        ComputerName = $env:COMPUTERNAME
+        Rules = @($script:Rules)
+    }
+    $bundle | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $dialog.FileName -Encoding UTF8
+    Write-AppLog -Message "规则备份完成：$($dialog.FileName)"
+}
+
+function Restore-RulesFromFile {
+    $dialog = [Windows.Forms.OpenFileDialog]::new()
+    $dialog.Title = '导入网络策略规则备份'
+    $dialog.Filter = 'JSON 文件 (*.json)|*.json'
+    if ($dialog.ShowDialog($form) -ne 'OK') { return }
+
+    $raw = Get-Content -LiteralPath $dialog.FileName -Raw -Encoding UTF8 | ConvertFrom-Json
+    $incoming = if ($null -ne $raw.Rules) { @($raw.Rules) } else { @($raw) }
+    if ($incoming.Count -eq 0) {
+        [Windows.Forms.MessageBox]::Show('备份中没有规则。', '无法导入', 'OK', 'Warning') | Out-Null
+        return
+    }
+
+    $answer = [Windows.Forms.MessageBox]::Show(
+        "将导入 $($incoming.Count) 条规则定义。为避免跨机器误删已有路由，导入后会清除“接管已有路由/代理”的所有权标记；不会立即修改 Windows 网络。是否继续？",
+        '确认导入规则备份', 'YesNo', 'Question')
+    if ($answer -ne 'Yes') { return }
+
+    $normalized = foreach ($rule in $incoming) {
+        [pscustomobject]@{
+            Id = if ([string]::IsNullOrWhiteSpace([string]$rule.Id)) { [Guid]::NewGuid().ToString('N') } else { [string]$rule.Id }
+            Name = [string]$rule.Name
+            Destination = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
+            AdapterGuid = Get-NormalizedGuid -Value ([string]$rule.AdapterGuid)
+            AdapterDescription = [string]$rule.AdapterDescription
+            GatewayMode = if ([string]$rule.GatewayMode -eq 'Auto') { 'Auto' } else { 'Manual' }
+            Gateway = if ([string]$rule.GatewayMode -eq 'Auto') { '' } else { [string]$rule.Gateway }
+            BypassProxy = [bool]$rule.BypassProxy
+            Enabled = [bool]$rule.Enabled
+            OwnExistingRoute = $false
+            OwnExistingProxy = $false
+        }
+    }
+
+    $oldRules = @($script:Rules)
+    try {
+        $script:Rules = @($normalized)
+        Assert-Configuration
+        Save-Rules
+        Write-AppLog -Message "已从备份导入 $($script:Rules.Count) 条规则定义：$($dialog.FileName)"
+        Refresh-Grid
+    } catch {
+        $script:Rules = $oldRules
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, '导入失败', 'OK', 'Error') | Out-Null
     }
 }
 
