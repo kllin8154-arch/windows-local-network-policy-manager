@@ -63,3 +63,16 @@ MCP 服务位于 `mcp/`，使用官方 MCP TypeScript SDK，通过 stdio 向 AI 
 - `Ctrl+D`：重新识别当前 Windows 网络策略。
 
 自动识别在启动时执行，但不会强制弹窗或自动接管已有系统路由；主界面的“待处理现有策略”卡片会提示数量，点击后再由用户决定是否导入或接管。
+
+
+## 只读验证
+
+日常开发后可直接运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\test.ps1"
+```
+
+增加 `-Ui` 会生成 `ui-smoke-test.png` 检查真实 WinForms 布局；增加 `-Mcp` 会同时执行 MCP TypeScript 类型检查。测试流程只读取网络状态，不应用或撤销路由。
+
+`build.ps1` 现在也会在编译启动 EXE 前自动执行管理器 `SelfTest`，配置或 PowerShell 语法异常时会直接停止构建。
