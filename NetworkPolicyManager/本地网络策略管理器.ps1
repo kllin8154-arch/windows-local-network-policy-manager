@@ -371,8 +371,10 @@ function Get-NetworkPolicyDiscovery {
             if (-not [bool]$_.BypassProxy) { return $false }
             try { (Get-ProxyTokenForRule -Rule $_) -eq $token } catch { $false }
         } | Select-Object -First 1)
+        $actionable = Test-IPv4Address -Value ([string]$token)
         [pscustomobject]@{
             Token = [string]$token
+            Actionable = [bool]$actionable
             Managed = $matchingRule.Count -gt 0
             RuleId = if ($matchingRule.Count -gt 0) { [string]$matchingRule[0].Id } else { '' }
         }
@@ -385,7 +387,7 @@ function Get-NetworkPolicyDiscovery {
         SpecificRoutes = @($specificRoutes)
         ProxyBypass = @($proxyRows)
         UnmanagedSpecificRouteCount = @($specificRoutes | Where-Object { -not $_.Managed }).Count
-        UnmanagedProxyBypassCount = @($proxyRows | Where-Object { -not $_.Managed }).Count
+        UnmanagedProxyBypassCount = @($proxyRows | Where-Object { $_.Actionable -and -not $_.Managed }).Count
     }
 }
 
