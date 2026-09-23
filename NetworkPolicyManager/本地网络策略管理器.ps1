@@ -1491,18 +1491,28 @@ function New-MetricCard {
     [pscustomobject]@{ Panel = $panel; Value = $valueLabel; Title = $titleLabel }
 }
 
-$metrics = [Windows.Forms.FlowLayoutPanel]::new()
+$metrics = [Windows.Forms.TableLayoutPanel]::new()
 $metrics.Dock = 'Fill'
-$metrics.WrapContents = $false
+$metrics.ColumnCount = 4
+$metrics.RowCount = 1
 $metrics.Padding = [Windows.Forms.Padding]::new(7, 0, 7, 0)
 $metrics.BackColor = $script:Theme.Background
+1..4 | ForEach-Object {
+    [void]$metrics.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 25))
+}
+[void]$metrics.RowStyles.Add([Windows.Forms.RowStyle]::new('Percent', 100))
 
 $ruleMetric = New-MetricCard -Title '规则状态' -Value '正在读取…'
 $adapterMetric = New-MetricCard -Title '已连接实体网卡' -Value '正在识别…'
 $routeMetric = New-MetricCard -Title '当前默认出口' -Value '正在识别…'
 $pendingMetric = New-MetricCard -Title '待处理现有策略' -Value '正在识别…'
-@($ruleMetric, $adapterMetric, $routeMetric, $pendingMetric) | ForEach-Object {
-    [void]$metrics.Controls.Add($_.Panel)
+$metricCards = @($ruleMetric, $adapterMetric, $routeMetric, $pendingMetric)
+for ($i = 0; $i -lt $metricCards.Count; $i++) {
+    $metricCards[$i].Panel.Dock = 'Fill'
+    $metricCards[$i].Panel.Margin = [Windows.Forms.Padding]::new(7, 7, 7, 5)
+    $metricCards[$i].Value.Anchor = 'Top,Left,Right'
+    $metricCards[$i].Value.Width = 260
+    [void]$metrics.Controls.Add($metricCards[$i].Panel, $i, 0)
 }
 
 $toolbar = [Windows.Forms.FlowLayoutPanel]::new()
@@ -1583,62 +1593,74 @@ Add-GridColumn -Name 'Actual' -Header '实际路由' -Width 150 -AutoSizeMode 'F
 $detailPanel = [Windows.Forms.Panel]::new()
 $detailPanel.Dock = 'Fill'
 $detailPanel.BackColor = $script:Theme.SurfaceAlt
-$detailPanel.Padding = [Windows.Forms.Padding]::new(16)
+
+$detailHeader = [Windows.Forms.Panel]::new()
+$detailHeader.Dock = 'Top'
+$detailHeader.Height = 108
+$detailHeader.Padding = [Windows.Forms.Padding]::new(16, 12, 16, 4)
+$detailHeader.BackColor = $script:Theme.SurfaceAlt
+$detailPanel.Controls.Add($detailHeader)
 
 $detailTitle = [Windows.Forms.Label]::new()
 $detailTitle.Text = 'RULE DETAIL'
 $detailTitle.Font = [Drawing.Font]::new('Segoe UI', 8, [Drawing.FontStyle]::Bold)
 $detailTitle.ForeColor = $script:Theme.AccentStrong
 $detailTitle.AutoSize = $true
-$detailTitle.Location = [Drawing.Point]::new(16, 14)
-$detailPanel.Controls.Add($detailTitle)
+$detailTitle.Location = [Drawing.Point]::new(16, 12)
+$detailHeader.Controls.Add($detailTitle)
 
 $detailNameLabel = [Windows.Forms.Label]::new()
 $detailNameLabel.Text = '选择一条规则'
 $detailNameLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 14, [Drawing.FontStyle]::Bold)
 $detailNameLabel.ForeColor = $script:Theme.Accent
 $detailNameLabel.AutoEllipsis = $true
-$detailNameLabel.Location = [Drawing.Point]::new(15, 36)
+$detailNameLabel.Location = [Drawing.Point]::new(15, 34)
+$detailNameLabel.Anchor = 'Top,Left,Right'
 $detailNameLabel.Size = [Drawing.Size]::new(315, 30)
-$detailPanel.Controls.Add($detailNameLabel)
+$detailHeader.Controls.Add($detailNameLabel)
 
 $detailStateLabel = [Windows.Forms.Label]::new()
 $detailStateLabel.Text = '—'
 $detailStateLabel.TextAlign = 'MiddleCenter'
 $detailStateLabel.BackColor = $script:Theme.Background
 $detailStateLabel.ForeColor = $script:Theme.MutedText
-$detailStateLabel.Location = [Drawing.Point]::new(16, 73)
+$detailStateLabel.Location = [Drawing.Point]::new(16, 72)
 $detailStateLabel.Size = [Drawing.Size]::new(150, 26)
-$detailPanel.Controls.Add($detailStateLabel)
+$detailHeader.Controls.Add($detailStateLabel)
+
+$detailActions = [Windows.Forms.FlowLayoutPanel]::new()
+$detailActions.Dock = 'Bottom'
+$detailActions.Height = 162
+$detailActions.Padding = [Windows.Forms.Padding]::new(10, 6, 10, 4)
+$detailActions.WrapContents = $true
+$detailActions.BackColor = $script:Theme.SurfaceAlt
+$detailPanel.Controls.Add($detailActions)
+
+$applyButton = New-UiButton -Text '应用' -Width 145 -Variant 'Primary'
+$testButton = New-UiButton -Text '诊断' -Width 145 -Variant 'Accent'
+$editButton = New-UiButton -Text '修改' -Width 145
+$copyDetailButton = New-UiButton -Text '复制详情' -Width 145
+$removeButton = New-UiButton -Text '撤销' -Width 145 -Variant 'Danger'
+$deleteButton = New-UiButton -Text '删除' -Width 145 -Variant 'Danger'
+@($applyButton, $testButton, $editButton, $copyDetailButton, $removeButton, $deleteButton) |
+    ForEach-Object { [void]$detailActions.Controls.Add($_) }
+
+$detailBody = [Windows.Forms.Panel]::new()
+$detailBody.Dock = 'Fill'
+$detailBody.Padding = [Windows.Forms.Padding]::new(16, 8, 16, 8)
+$detailBody.BackColor = $script:Theme.SurfaceAlt
+$detailPanel.Controls.Add($detailBody)
+$detailBody.BringToFront()
 
 $detailBox = [Windows.Forms.RichTextBox]::new()
+$detailBox.Dock = 'Fill'
 $detailBox.ReadOnly = $true
 $detailBox.BorderStyle = 'None'
 $detailBox.BackColor = $script:Theme.SurfaceAlt
 $detailBox.ForeColor = $script:Theme.WarmText
 $detailBox.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
-$detailBox.Location = [Drawing.Point]::new(16, 112)
-$detailBox.Anchor = 'Top,Bottom,Left,Right'
-$detailBox.Size = [Drawing.Size]::new(320, 260)
 $detailBox.Text = "选择左侧规则后，这里会显示期望出口、当前状态和所有权信息。"
-$detailPanel.Controls.Add($detailBox)
-
-$detailActions = [Windows.Forms.FlowLayoutPanel]::new()
-$detailActions.Dock = 'Bottom'
-$detailActions.Height = 116
-$detailActions.Padding = [Windows.Forms.Padding]::new(0, 6, 0, 0)
-$detailActions.WrapContents = $true
-$detailActions.BackColor = $script:Theme.SurfaceAlt
-$detailPanel.Controls.Add($detailActions)
-
-$applyButton = New-UiButton -Text '应用' -Width 150 -Variant 'Primary'
-$testButton = New-UiButton -Text '诊断' -Width 150 -Variant 'Accent'
-$editButton = New-UiButton -Text '修改' -Width 150
-$copyDetailButton = New-UiButton -Text '复制详情' -Width 150
-$removeButton = New-UiButton -Text '撤销' -Width 150 -Variant 'Danger'
-$deleteButton = New-UiButton -Text '删除' -Width 150 -Variant 'Danger'
-@($applyButton, $testButton, $editButton, $copyDetailButton, $removeButton, $deleteButton) |
-    ForEach-Object { [void]$detailActions.Controls.Add($_) }
+$detailBody.Controls.Add($detailBox)
 
 $split = [Windows.Forms.SplitContainer]::new()
 $split.Dock = 'Fill'
@@ -1655,14 +1677,22 @@ $logPanel = [Windows.Forms.Panel]::new()
 $logPanel.Dock = 'Fill'
 $logPanel.BackColor = $script:Theme.SurfaceAlt
 
+$logLayout = [Windows.Forms.TableLayoutPanel]::new()
+$logLayout.Dock = 'Fill'
+$logLayout.ColumnCount = 1
+$logLayout.RowCount = 2
+[void]$logLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100))
+[void]$logLayout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 24))
+[void]$logLayout.RowStyles.Add([Windows.Forms.RowStyle]::new('Percent', 100))
+$logPanel.Controls.Add($logLayout)
+
 $logTitle = [Windows.Forms.Label]::new()
 $logTitle.Text = '操作日志'
-$logTitle.Dock = 'Top'
-$logTitle.Height = 24
+$logTitle.Dock = 'Fill'
 $logTitle.Padding = [Windows.Forms.Padding]::new(12, 4, 0, 0)
 $logTitle.ForeColor = $script:Theme.MutedText
 $logTitle.Font = [Drawing.Font]::new('Microsoft YaHei UI', 8, [Drawing.FontStyle]::Bold)
-$logPanel.Controls.Add($logTitle)
+$logLayout.Controls.Add($logTitle, 0, 0)
 
 $logBox = [Windows.Forms.RichTextBox]::new()
 $logBox.Dock = 'Fill'
@@ -1671,8 +1701,7 @@ $logBox.BackColor = $script:Theme.SurfaceAlt
 $logBox.ForeColor = $script:Theme.Accent
 $logBox.BorderStyle = 'None'
 $logBox.Font = [Drawing.Font]::new('Consolas', 9)
-$logPanel.Controls.Add($logBox)
-$logBox.BringToFront()
+$logLayout.Controls.Add($logBox, 0, 1)
 $script:LogControl = $logBox
 
 $footer = [Windows.Forms.FlowLayoutPanel]::new()
