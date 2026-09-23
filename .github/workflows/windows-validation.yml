@@ -1,0 +1,65 @@
+name: Windows validation
+
+on:
+  push:
+    branches:
+      - feature/auto-discovery-mcp
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            '.\\NetworkPolicyManager\\本地网络策略管理器.ps1',
+            '.\\NetworkPolicyManager\\build.ps1',
+            '.\\NetworkPolicyManager\\test.ps1',
+            '.\\NetworkPolicyManager\\mcp\\setup.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              throw "PowerShell parse failed: $file"
+            }
+            Write-Host "PARSE_OK $file"
+          }
+
+      - name: Manager self-test
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\NetworkPolicyManager\\本地网络策略管理器.ps1" -SelfTest
+
+      - name: Build launcher
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\NetworkPolicyManager\\build.ps1"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install MCP dependencies
+        working-directory: NetworkPolicyManager/mcp
+        shell: powershell
+        run: npm install
+
+      - name: Typecheck MCP
+        working-directory: NetworkPolicyManager/mcp
+        shell: powershell
+        run: npm run check
