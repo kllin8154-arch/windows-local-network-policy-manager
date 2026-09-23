@@ -50,9 +50,14 @@ async function runManager(command: string, extraArgs: string[] = []): Promise<Js
 }
 
 function toolResult(data: unknown) {
+  const structuredContent: Record<string, unknown> =
+    data !== null && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : { value: data };
+
   return {
     content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-    structuredContent: data,
+    structuredContent,
   };
 }
 
