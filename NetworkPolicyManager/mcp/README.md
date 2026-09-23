@@ -17,9 +17,11 @@
 
 ```powershell
 Set-Location .\NetworkPolicyManager\mcp
-npm install
+.\setup.ps1
 npm run start
 ```
+
+`setup.ps1` 会检查 Node.js 20+、安装依赖，并执行 `npm run check` 完成 TypeScript 类型检查。
 
 stdio 模式启动后会等待 MCP Host 连接，不会显示普通交互界面。
 
