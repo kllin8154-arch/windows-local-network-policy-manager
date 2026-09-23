@@ -3,9 +3,10 @@ param(
     [switch]$SelfTest,
     [switch]$DumpStatus,
     [switch]$UiSmokeTest,
-    [ValidateSet('ListRules', 'Discover', 'ApplyRule', 'RemoveRule', 'TestRule')]
+    [ValidateSet('ListRules', 'Discover', 'SaveRule', 'ApplyRule', 'RemoveRule', 'TestRule')]
     [string]$Command,
     [string]$RuleId,
+    [string]$RuleJson,
     [switch]$Approved
 )
 
@@ -672,6 +673,37 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
         'Discover' {
             Get-NetworkPolicyDiscovery | ConvertTo-Json -Depth 8
             exit 0
+        }
+        'SaveRule' {
+            if ([string]::IsNullOrWhiteSpace($RuleJson)) { throw 'SaveRule 需要 -RuleJson。' }
+            $incoming = $RuleJson | ConvertFrom-Json
+            $id = if ([string]::IsNullOrWhiteSpace([string]$incoming.Id)) { [Guid]::NewGuid().ToString('N') } else { [string]$incoming.Id }
+            $rule = [pscustomobject]@{
+                Id = $id
+                Name = [string]$incoming.Name
+                Destination = ConvertTo-NormalizedPrefix -Value ([string]$incoming.Destination)
+                AdapterGuid = Get-NormalizedGuid -Value ([string]$incoming.AdapterGuid)
+                AdapterDescription = [string]$incoming.AdapterDescription
+                GatewayMode = if ([string]$incoming.GatewayMode -eq 'Auto') { 'Auto' } else { 'Manual' }
+                Gateway = if ([string]$incoming.GatewayMode -eq 'Auto') { '' } else { [string]$incoming.Gateway }
+                BypassProxy = [bool]$incoming.BypassProxy
+                Enabled = if ($null -eq $incoming.Enabled) { $true } else { [bool]$incoming.Enabled }
+                OwnExistingRoute = [bool]$incoming.OwnExistingRoute
+                OwnExistingProxy = [bool]$incoming.OwnExistingProxy
+            }
+            $oldRules = @($script:Rules)
+            try {
+                $script:Rules = @($script:Rules | Where-Object Id -ne $id)
+                $script:Rules += $rule
+                Assert-Configuration
+                Save-Rules
+                Write-AppLog -Message "CLI 保存规则：$($rule.Name) | $($rule.Destination)"
+                $rule | ConvertTo-Json -Depth 8
+                exit 0
+            } catch {
+                $script:Rules = $oldRules
+                throw
+            }
         }
         'TestRule' {
             if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'TestRule 需要 -RuleId。' }
