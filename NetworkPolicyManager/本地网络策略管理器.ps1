@@ -303,7 +303,9 @@ function Get-SystemSnapshot {
 }
 
 function Get-NetworkPolicyDiscovery {
-    $snapshot = Get-SystemSnapshot
+    param([object]$Snapshot = $null)
+
+    $snapshot = if ($null -eq $Snapshot) { Get-SystemSnapshot } else { $Snapshot }
     $ipRows = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
 
     $adapterRows = foreach ($adapter in $snapshot.Adapters) {
@@ -1876,7 +1878,8 @@ function Refresh-Grid {
             $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0'
         } | Sort-Object RouteMetric)
 
-        $discovery = Get-NetworkPolicyDiscovery
+        $discovery = Get-NetworkPolicyDiscovery -Snapshot $snapshot
+        $script:LastDiscovery = $discovery
         $pending = [int]$discovery.UnmanagedSpecificRouteCount + [int]$discovery.UnmanagedProxyBypassCount
 
         $ruleMetric.Value.Text = "$applied / $($script:Rules.Count) 已应用"
@@ -2242,10 +2245,19 @@ $toolTip.SetToolTip($applyButton, '应用当前规则到 Windows')
 $toolTip.SetToolTip($testButton, '只读诊断 Windows 实际选路和代理状态')
 
 $isAdministrator = Test-IsAdministrator
+$modeLabel.Text = if ($isAdministrator) {
+    '管理员模式 · 可应用和撤销网络策略'
+} else {
+    '只读模式 · 可识别、搜索、诊断和备份'
+}
+$modeLabel.ForeColor = if ($isAdministrator) { $script:Theme.Accent } else { $script:Theme.AccentStrong }
+
 if (-not $isAdministrator) {
     @($addButton, $editButton, $deleteButton, $applyButton, $applyAllButton, $removeButton) |
         ForEach-Object { $_.Enabled = $false }
-    $descriptionLabel.Text += ' 当前为只读模式。'
+    $descriptionLabel.Text += ' · 当前为只读模式'
+} else {
+    Set-SelectedActionState -HasSelection $false
 }
 
 if (Test-Path -LiteralPath $script:LogPath) {
@@ -2256,18 +2268,20 @@ if (Test-Path -LiteralPath $script:LogPath) {
 $form.Add_Shown({
     Write-AppLog -Message "程序启动；管理员=$isAdministrator"
     Refresh-Grid
-    try {
-        $discovery = Get-NetworkPolicyDiscovery
-        Write-AppLog -Message "自动识别完成：特定目标路由=$($discovery.SpecificRoutes.Count)，未管理=$($discovery.UnmanagedSpecificRouteCount)，代理绕过未管理=$($discovery.UnmanagedProxyBypassCount)"
-        if (-not $UiSmokeTest -and ($discovery.UnmanagedSpecificRouteCount -gt 0 -or $discovery.UnmanagedProxyBypassCount -gt 0)) {
-            $form.BeginInvoke([Action]{ Show-DiscoveryDialog }) | Out-Null
+
+    if ($null -ne $script:LastDiscovery) {
+        $pending = [int]$script:LastDiscovery.UnmanagedSpecificRouteCount +
+            [int]$script:LastDiscovery.UnmanagedProxyBypassCount
+        Write-AppLog -Message "自动识别完成：特定目标路由=$($script:LastDiscovery.SpecificRoutes.Count)，待处理=$pending"
+        if (-not $UiSmokeTest -and $pending -gt 0) {
+            $summaryLabel.Text = '已自动识别当前网络' + [Environment]::NewLine +
+                "发现 $pending 条现有策略待你决定是否纳入管理"
         }
-    } catch {
-        Write-AppLog -Message ("自动识别失败：" + $_.Exception.Message) -Level 'WARN'
     }
+
     if ($UiSmokeTest) {
         $script:SmokeTimer = [Windows.Forms.Timer]::new()
-        $script:SmokeTimer.Interval = 1200
+        $script:SmokeTimer.Interval = 1400
         $script:SmokeTimer.Add_Tick({
             $script:SmokeTimer.Stop()
             $bitmap = [Drawing.Bitmap]::new($form.Width, $form.Height)
