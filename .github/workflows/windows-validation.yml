@@ -21,6 +21,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $files = @(
+            './NetworkPolicyManager/package-portable.ps1',
             '.\\NetworkPolicyManager\\本地网络策略管理器.ps1',
             '.\\NetworkPolicyManager\\build.ps1',
             '.\\NetworkPolicyManager\\test.ps1',
@@ -45,9 +46,16 @@ jobs:
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\NetworkPolicyManager\\本地网络策略管理器.ps1" -SelfTest
 
-      - name: Build launcher
+      - name: Build portable package
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\NetworkPolicyManager\\build.ps1"
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "./NetworkPolicyManager/package-portable.ps1"
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalNetworkPolicyManager-Portable-win-x64
+          path: dist/LocalNetworkPolicyManager-Portable-0.2.0-preview.1-win-x64.zip
+          if-no-files-found: error
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -57,7 +65,7 @@ jobs:
       - name: Install MCP dependencies
         working-directory: NetworkPolicyManager/mcp
         shell: powershell
-        run: npm install
+        run: npm ci
 
       - name: Typecheck MCP
         working-directory: NetworkPolicyManager/mcp

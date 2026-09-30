@@ -10,6 +10,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 
 构建完成后会在仓库根目录生成 `本地网络策略管理器.exe`。
 
+需要免安装 ZIP 时，在仓库根目录运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\package-portable.ps1"
+```
+
+压缩包位于 `dist/`，内含启动程序、管理器脚本、默认规则模板和使用说明。首次启动会生成可编辑的 `network-rules.json`；升级解压不会覆盖已有规则和 `manager-state.json`。详见 `README-免安装.md`。
+
 程序支持：
 
 - 启动时自动扫描当前 IPv4 网卡、默认路由、特定目标路由和 IPv4 代理绕过项；

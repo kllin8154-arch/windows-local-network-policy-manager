@@ -7,6 +7,8 @@ Thumbs.db
 # Compiled build outputs
 *.exe
 *.pdb
+/dist/
+/NetworkPolicyManager/mcp/node_modules/
 
 # Local runtime state and logs
 *.log

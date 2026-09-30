@@ -15,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:AppRoot = $PSScriptRoot
 $script:RulesPath = Join-Path $script:AppRoot 'network-rules.json'
+$script:DefaultRulesPath = Join-Path $script:AppRoot 'network-rules.default.json'
 $script:StatePath = Join-Path $script:AppRoot 'manager-state.json'
 $script:LogPath = Join-Path $script:AppRoot 'network-policy-manager.log'
 $script:Rules = @()
@@ -52,7 +53,9 @@ function Read-JsonArray {
     if ([string]::IsNullOrWhiteSpace($text)) {
         return @()
     }
-    @($text | ConvertFrom-Json)
+    $parsed = ConvertFrom-Json -InputObject $text
+    if ($parsed -isnot [array]) { throw "JSON 根节点必须是数组：$Path" }
+    foreach ($item in $parsed) { $item }
 }
 
 function Save-Rules {
@@ -702,8 +705,14 @@ function Assert-Configuration {
     }
 }
 
-$script:Rules = Read-JsonArray -Path $script:RulesPath
-$script:State = Read-JsonArray -Path $script:StatePath
+if (-not (Test-Path -LiteralPath $script:RulesPath)) {
+    if (-not (Test-Path -LiteralPath $script:DefaultRulesPath)) {
+        throw "缺少规则文件：$($script:RulesPath)。请从备份恢复，或重新解压完整免安装包。"
+    }
+    Copy-Item -LiteralPath $script:DefaultRulesPath -Destination $script:RulesPath
+}
+$script:Rules = @(Read-JsonArray -Path $script:RulesPath)
+$script:State = @(Read-JsonArray -Path $script:StatePath)
 Assert-Configuration
 
 if (-not [string]::IsNullOrWhiteSpace($Command)) {
@@ -1590,16 +1599,22 @@ Add-GridColumn -Name 'Proxy' -Header '代理' -Width 58
 Add-GridColumn -Name 'Status' -Header '当前状态' -Width 190
 Add-GridColumn -Name 'Actual' -Header '实际路由' -Width 150 -AutoSizeMode 'Fill'
 
-$detailPanel = [Windows.Forms.Panel]::new()
+$detailPanel = [Windows.Forms.TableLayoutPanel]::new()
 $detailPanel.Dock = 'Fill'
 $detailPanel.BackColor = $script:Theme.SurfaceAlt
+$detailPanel.ColumnCount = 1
+$detailPanel.RowCount = 3
+[void]$detailPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100))
+[void]$detailPanel.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 108))
+[void]$detailPanel.RowStyles.Add([Windows.Forms.RowStyle]::new('Percent', 100))
+[void]$detailPanel.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 162))
 
 $detailHeader = [Windows.Forms.Panel]::new()
 $detailHeader.Dock = 'Top'
 $detailHeader.Height = 108
 $detailHeader.Padding = [Windows.Forms.Padding]::new(16, 12, 16, 4)
 $detailHeader.BackColor = $script:Theme.SurfaceAlt
-$detailPanel.Controls.Add($detailHeader)
+$detailPanel.Controls.Add($detailHeader, 0, 0)
 
 $detailTitle = [Windows.Forms.Label]::new()
 $detailTitle.Text = 'RULE DETAIL'
@@ -1634,7 +1649,7 @@ $detailActions.Height = 162
 $detailActions.Padding = [Windows.Forms.Padding]::new(10, 6, 10, 4)
 $detailActions.WrapContents = $true
 $detailActions.BackColor = $script:Theme.SurfaceAlt
-$detailPanel.Controls.Add($detailActions)
+$detailPanel.Controls.Add($detailActions, 0, 2)
 
 $applyButton = New-UiButton -Text '应用' -Width 145 -Variant 'Primary'
 $testButton = New-UiButton -Text '诊断' -Width 145 -Variant 'Accent'
@@ -1649,8 +1664,7 @@ $detailBody = [Windows.Forms.Panel]::new()
 $detailBody.Dock = 'Fill'
 $detailBody.Padding = [Windows.Forms.Padding]::new(16, 8, 16, 8)
 $detailBody.BackColor = $script:Theme.SurfaceAlt
-$detailPanel.Controls.Add($detailBody)
-$detailBody.BringToFront()
+$detailPanel.Controls.Add($detailBody, 0, 1)
 
 $detailBox = [Windows.Forms.RichTextBox]::new()
 $detailBox.Dock = 'Fill'
@@ -1663,6 +1677,7 @@ $detailBox.Text = "选择左侧规则后，这里会显示期望出口、当前�
 $detailBody.Controls.Add($detailBox)
 
 $split = [Windows.Forms.SplitContainer]::new()
+$split.Size = [Drawing.Size]::new(1340, 400)
 $split.Dock = 'Fill'
 $split.Orientation = 'Vertical'
 $split.SplitterWidth = 5
@@ -1852,7 +1867,7 @@ function Update-RuleDetail {
         "所有权      $ownership",
         "规则 ID     $($rule.Id)",
         "",
-        "双击规则可修改；“诊断”会检查 Windows 最终选路、代理绕过和管理状态。"
+        '双击规则可修改；诊断会检查 Windows 最终选路、代理绕过和管理状态。'
     ) -join [Environment]::NewLine
 
     Set-SelectedActionState -HasSelection $true
@@ -1978,7 +1993,7 @@ function Refresh-Grid {
         $routeMetric.Value.Text = if ($defaults.Count -eq 0) { '无 IPv4 默认出口' } else {
             "$($defaults[0].InterfaceAlias) → $($defaults[0].NextHop)"
         }
-        $pendingMetric.Value.Text = if ($pending -eq 0) { '0 · 当前已归档' } else { "$pending 条 · 点击“识别当前策略”处理" }
+        $pendingMetric.Value.Text = if ($pending -eq 0) { '0 · 当前已归档' } else { "$pending 条 · 点击识别当前策略处理" }
         $pendingMetric.Panel.BackColor = if ($pending -gt 0) { $script:Theme.Accent } else { $script:Theme.SurfaceAlt }
         $pendingMetric.Value.ForeColor = if ($pending -gt 0) { $script:Theme.DarkText } else { $script:Theme.Accent }
         $pendingMetric.Title.ForeColor = if ($pending -gt 0) { $script:Theme.DarkText } else { $script:Theme.MutedText }

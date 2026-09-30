@@ -10,6 +10,10 @@
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\build.ps1"`，
 即可在根目录生成 `本地网络策略管理器.exe`。编译产物和本机运行状态不纳入版本控制。
 
+需要免安装包时，在仓库根目录运行
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\package-portable.ps1"`。
+生成的 ZIP 位于 `dist`，解压使用与升级说明见 `NetworkPolicyManager/README-免安装.md`。
+
 管理器只维护精确路由和选定的系统代理绕过，不修改默认路由、IP、DHCP 或网卡跃点。
 详细说明见 `NetworkPolicyManager/README.md`。
 
