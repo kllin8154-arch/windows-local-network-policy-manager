@@ -895,7 +895,7 @@ function Get-RuleStatus {
     }
 }
 
-function Apply-RulePolicy {
+function Invoke-ApplyRulePolicyCore {
     param([Parameter(Mandatory)]$Rule)
 
     if (-not (Test-IsAdministrator)) {
@@ -1000,7 +1000,7 @@ function Apply-RulePolicy {
     }
 }
 
-function Remove-RulePolicy {
+function Invoke-RemoveRulePolicyCore {
     param([Parameter(Mandatory)]$Rule)
 
     if (-not (Test-IsAdministrator)) {
@@ -1054,6 +1054,54 @@ function Remove-RulePolicy {
 
     Remove-StateEntry -Id ([string]$Rule.Id)
     Write-AppLog -Message "已撤销：$($Rule.Name) | $prefix"
+}
+
+function Apply-RulePolicy {
+    param(
+        [Parameter(Mandatory)]$Rule,
+        [string]$ExpectedFingerprint = ''
+    )
+
+    $lock = Enter-MutationLock
+    try {
+        $plan = Get-RulePlan -Rule $Rule -Action 'Apply'
+        if (-not [bool]$plan.Allowed) {
+            throw ("应用前检查未通过：" + (@($plan.Errors) -join '；'))
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedFingerprint) -and
+            [string]$plan.Fingerprint -ne $ExpectedFingerprint) {
+            throw '网络状态自计划生成后已经变化。为避免基于过期状态修改网络，请重新生成计划后再确认。'
+        }
+
+        [void](New-SafetySnapshot -Reason 'before-apply-rule' -RuleId ([string]$Rule.Id))
+        Invoke-ApplyRulePolicyCore -Rule $Rule
+    } finally {
+        Exit-MutationLock -Mutex $lock
+    }
+}
+
+function Remove-RulePolicy {
+    param(
+        [Parameter(Mandatory)]$Rule,
+        [string]$ExpectedFingerprint = ''
+    )
+
+    $lock = Enter-MutationLock
+    try {
+        $plan = Get-RulePlan -Rule $Rule -Action 'Remove'
+        if (-not [bool]$plan.Allowed) {
+            throw ("撤销前检查未通过：" + (@($plan.Errors) -join '；'))
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedFingerprint) -and
+            [string]$plan.Fingerprint -ne $ExpectedFingerprint) {
+            throw '网络状态自计划生成后已经变化。为避免基于过期状态撤销网络策略，请重新生成计划后再确认。'
+        }
+
+        [void](New-SafetySnapshot -Reason 'before-remove-rule' -RuleId ([string]$Rule.Id))
+        Invoke-RemoveRulePolicyCore -Rule $Rule
+    } finally {
+        Exit-MutationLock -Mutex $lock
+    }
 }
 
 function Test-RulePolicy {
