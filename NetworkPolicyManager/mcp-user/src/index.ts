@@ -84,6 +84,29 @@ server.registerTool("network_policy_list_rules", {
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, async () => result(await runManager("ListRules")));
 
+server.registerTool("network_policy_list_groups", {
+  title: "读取规则分组",
+  description: "只读。返回分组名称、规则数、启用数和分组内标签汇总；空 Group 表示未分组。",
+  inputSchema: z.object({}),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async () => result(await runManager("ListGroups")));
+
+server.registerTool("network_policy_plan_group", {
+  title: "生成整组规则计划",
+  description: "只读。对一个分组中的启用规则逐条生成独立 Plan/Fingerprint，并汇总是否全部允许执行和预计系统变更数。该工具本身不会批量应用。",
+  inputSchema: z.object({
+    group: z.string().max(60).describe("精确分组名；空字符串表示未分组。"),
+    action: z.enum(["Apply", "Remove"]),
+  }),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async ({ group, action }) => {
+  const args = group
+    ? ["-Group", group, "-Action", action]
+    : ["-Action", action];
+  return result(await runManager("PlanGroup", args));
+});
+
+
 server.registerTool("network_policy_plan", {
   title: "生成规则变更计划",
   description: "只读。对应用或撤销生成实时计划和 Fingerprint。真正执行时必须提交同一个 Fingerprint；网络状态变化后旧计划会失效。",
@@ -125,6 +148,8 @@ server.registerTool("network_policy_save_rule", {
     approved: z.literal(true).describe("用户明确同意保存规则定义后必须为 true。"),
     id: z.string().optional(),
     name: z.string().min(1),
+    group: z.string().max(60).optional().default(""),
+    tags: z.array(z.string().min(1).max(40)).max(20).optional().default([]),
     destination: z.string().min(1),
     adapterGuid: z.string().min(1),
     adapterDescription: z.string().min(1),
@@ -138,6 +163,8 @@ server.registerTool("network_policy_save_rule", {
   const payload = {
     Id: input.id ?? "",
     Name: input.name,
+    Group: input.group ?? "",
+    Tags: input.tags ?? [],
     Destination: input.destination,
     AdapterGuid: input.adapterGuid,
     AdapterDescription: input.adapterDescription,
