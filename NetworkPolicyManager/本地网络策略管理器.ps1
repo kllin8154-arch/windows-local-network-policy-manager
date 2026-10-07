@@ -1086,16 +1086,16 @@ function Get-RulePlan {
         }
     }
 
-    $matchingRoutes = if ($null -eq $desired) { @() } else {
-        @($exactRoutes | Where-Object {
+    $matchingRoutes = @(if ($null -ne $desired) {
+        $exactRoutes | Where-Object {
             $_.InterfaceIndex -eq $desired.InterfaceIndex -and $_.Gateway -eq $desired.Gateway
-        })
-    }
-    $conflicts = if ($null -eq $desired) { @() } else {
-        @($exactRoutes | Where-Object {
+        }
+    })
+    $conflicts = @(if ($null -ne $desired) {
+        $exactRoutes | Where-Object {
             $_.InterfaceIndex -ne $desired.InterfaceIndex -or $_.Gateway -ne $desired.Gateway
-        })
-    }
+        }
+    })
 
     $canReplaceConflicts = $false
     if ($conflicts.Count -gt 0 -and $previousRouteOwned -and
