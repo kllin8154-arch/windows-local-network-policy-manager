@@ -2867,7 +2867,12 @@ function Show-DiscoveryDialog {
     $hero.Controls.Add($heroTitle)
 
     $heroText = [Windows.Forms.Label]::new()
-    $heroText.Text = "识别到 $($discovery.Adapters.Count) 张网卡 · $($discovery.DefaultRoutes.Count) 条默认路由 · $($discovery.SpecificRoutes.Count) 条特定路由；未管理 $($discovery.UnmanagedSpecificRouteCount) 条。自动识别仅查看，接管已有策略必须由你确认。"
+    $defaultHint = if ($discovery.HasMultipleDefaultRoutes) {
+        "检测到 $($discovery.DefaultRouteCount) 个默认出口（网线 / Wi-Fi / 虚拟或 VPN 可能并存），下方按 Route Metric + Interface Metric 排序。"
+    } else {
+        "检测到 $($discovery.DefaultRouteCount) 个默认出口。"
+    }
+    $heroText.Text = "识别到 $($discovery.Adapters.Count) 张网卡 · $($discovery.SpecificRoutes.Count) 条特定路由；未管理 $($discovery.UnmanagedSpecificRouteCount) 条。$defaultHint 自动识别仅查看，接管已有策略必须由你确认。"
     $heroText.ForeColor = $script:Theme.MutedText
     $heroText.AutoSize = $true
     $heroText.MaximumSize = [Drawing.Size]::new(1020, 0)
@@ -2906,6 +2911,11 @@ function Show-DiscoveryDialog {
         $flags.Dispose()
     })
 
+    $defaultTab = [Windows.Forms.TabPage]::new()
+    $defaultTab.Text = "默认出口  $($discovery.DefaultRouteCount)"
+    $defaultTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($defaultTab)
+
     $routeTab = [Windows.Forms.TabPage]::new()
     $routeTab.Text = "特定路由  $($discovery.SpecificRoutes.Count)"
     $routeTab.BackColor = $script:Theme.Background
@@ -2920,6 +2930,56 @@ function Show-DiscoveryDialog {
     $proxyTab.Text = "代理绕过  $($discovery.ProxyBypass.Count)"
     $proxyTab.BackColor = $script:Theme.Background
     $tabs.TabPages.Add($proxyTab)
+
+    $defaultGrid = [Windows.Forms.DataGridView]::new()
+    $defaultGrid.Dock = 'Fill'
+    $defaultGrid.ReadOnly = $true
+    $defaultGrid.AllowUserToAddRows = $false
+    $defaultGrid.AllowUserToDeleteRows = $false
+    $defaultGrid.AllowUserToResizeRows = $false
+    $defaultGrid.RowHeadersVisible = $false
+    $defaultGrid.SelectionMode = 'FullRowSelect'
+    $defaultGrid.MultiSelect = $false
+    $defaultGrid.AutoGenerateColumns = $false
+    Initialize-GridTheme -Grid $defaultGrid
+    $defaultTab.Controls.Add($defaultGrid)
+
+    foreach ($spec in @(
+        @('Priority','优先',60),
+        @('Adapter','网卡',180),
+        @('Kind','类型',105),
+        @('Provider','虚拟 / VPN',125),
+        @('Gateway','网关',145),
+        @('RouteMetric','Route Metric',90),
+        @('InterfaceMetric','接口 Metric',90),
+        @('EffectiveMetric','有效 Metric',90)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'Adapter') { $column.AutoSizeMode = 'Fill' }
+        [void]$defaultGrid.Columns.Add($column)
+    }
+
+    $priority = 0
+    foreach ($route in @($discovery.DefaultRoutes)) {
+        $priority++
+        $rowIndex = $defaultGrid.Rows.Add(
+            $(if ($priority -eq 1) { '首选' } else { [string]$priority }),
+            [string]$route.InterfaceAlias,
+            [string]$route.AdapterKind,
+            [string]$route.VirtualProvider,
+            [string]$route.Gateway,
+            [string]$route.RouteMetric,
+            [string]$route.InterfaceMetric,
+            [string]$route.EffectiveMetric
+        )
+        if ($priority -eq 1) {
+            $defaultGrid.Rows[$rowIndex].DefaultCellStyle.BackColor = $script:Theme.SurfaceAlt
+            $defaultGrid.Rows[$rowIndex].DefaultCellStyle.ForeColor = $script:Theme.Accent
+        }
+    }
 
     $grid = [Windows.Forms.DataGridView]::new()
     $grid.Dock = 'Fill'
@@ -2936,11 +2996,12 @@ function Show-DiscoveryDialog {
 
     foreach ($spec in @(
         @('Managed','管理状态',95),
-        @('Destination','目标 IPv4 / CIDR',175),
-        @('Adapter','实际网卡',210),
-        @('Gateway','下一跳',150),
-        @('Metric','Metric',72),
-        @('RuleName','匹配规则',260)
+        @('Destination','目标 IPv4 / CIDR',160),
+        @('Adapter','实际网卡',165),
+        @('Kind','类型',100),
+        @('Gateway','下一跳',135),
+        @('Metric','有效 Metric',82),
+        @('RuleName','匹配规则',230)
     )) {
         $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
         $column.Name = $spec[0]
@@ -2958,8 +3019,9 @@ function Show-DiscoveryDialog {
             $stateText,
             [string]$route.Destination,
             [string]$route.InterfaceAlias,
+            $(if ([string]::IsNullOrWhiteSpace([string]$route.VirtualProvider)) { [string]$route.AdapterKind } else { "$($route.AdapterKind) / $($route.VirtualProvider)" }),
             [string]$route.Gateway,
-            [string]$route.Metric,
+            [string]$route.EffectiveMetric,
             [string]$route.RuleName
         )
         $row = $grid.Rows[$index]
@@ -2990,12 +3052,16 @@ function Show-DiscoveryDialog {
     $adapterTab.Controls.Add($adapterGrid)
 
     foreach ($spec in @(
-        @('Status','状态',82),
-        @('Name','网卡名称',150),
-        @('Description','硬件 / 驱动描述',300),
-        @('IPv4','IPv4',210),
-        @('Gateway','默认网关',150),
-        @('Guid','硬件 GUID',260)
+        @('Status','状态',70),
+        @('Name','网卡名称',135),
+        @('Kind','类型',95),
+        @('Provider','虚拟 / VPN',110),
+        @('Description','硬件 / 驱动描述',220),
+        @('IPv4','IPv4',170),
+        @('Gateway','默认网关',135),
+        @('Metric','接口 Metric',85),
+        @('Speed','链路速率',95),
+        @('Guid','硬件 GUID',230)
     )) {
         $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
         $column.Name = $spec[0]
@@ -3013,9 +3079,13 @@ function Show-DiscoveryDialog {
         $rowIndex = $adapterGrid.Rows.Add(
             [string]$adapter.Status,
             [string]$adapter.Name,
+            [string]$adapter.Kind,
+            [string]$adapter.VirtualProvider,
             [string]$adapter.Description,
             (@($adapter.IPv4) -join ' / '),
             $gatewayText,
+            [string]$adapter.InterfaceMetric,
+            [string]$adapter.LinkSpeed,
             [string]$adapter.Guid
         )
         if ([string]$adapter.Status -eq 'Up') {
