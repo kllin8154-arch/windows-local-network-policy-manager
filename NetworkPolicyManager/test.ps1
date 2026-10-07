@@ -6,7 +6,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $manager = Join-Path $PSScriptRoot '本地网络策略管理器.ps1'
-$mcpRoot = Join-Path $PSScriptRoot 'mcp'
+$mcpRoots = @(
+    Join-Path $PSScriptRoot 'mcp-user'
+    Join-Path $PSScriptRoot 'mcp-dev'
+)
 
 function Invoke-ManagerReadOnly {
     param([string[]]$Arguments)
@@ -57,18 +60,20 @@ if ($Mcp) {
     if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
         throw '请求 MCP 检查，但系统未找到 npm.cmd。'
     }
-    Push-Location $mcpRoot
-    try {
-        if (-not (Test-Path -LiteralPath (Join-Path $mcpRoot 'node_modules'))) {
-            Write-Host 'MCP node_modules 不存在，先执行 npm install...' -ForegroundColor Cyan
-            & npm.cmd install
-            if ($LASTEXITCODE -ne 0) { throw 'npm install 失败。' }
+    foreach ($mcpRoot in $mcpRoots) {
+        Push-Location $mcpRoot
+        try {
+            if (-not (Test-Path -LiteralPath (Join-Path $mcpRoot 'node_modules'))) {
+                Write-Host "MCP 依赖不存在，执行 npm ci：$mcpRoot" -ForegroundColor Cyan
+                & npm.cmd ci
+                if ($LASTEXITCODE -ne 0) { throw "npm ci 失败：$mcpRoot" }
+            }
+            & npm.cmd run check
+            if ($LASTEXITCODE -ne 0) { throw "MCP TypeScript 类型检查失败：$mcpRoot" }
+            Write-Host "MCP TypeScript 检查通过：$mcpRoot" -ForegroundColor Green
+        } finally {
+            Pop-Location
         }
-        & npm.cmd run check
-        if ($LASTEXITCODE -ne 0) { throw 'MCP TypeScript 类型检查失败。' }
-        Write-Host 'MCP TypeScript 检查通过。' -ForegroundColor Green
-    } finally {
-        Pop-Location
     }
 }
 
