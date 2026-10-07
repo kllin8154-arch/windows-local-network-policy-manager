@@ -2829,15 +2829,43 @@ function Show-RuleEditor {
         $bypassCheck.Checked = [bool]$Rule.BypassProxy
         $enabledCheck.Checked = [bool]$Rule.Enabled
     } else {
-        $realtekIndex = -1
-        for ($i = 0; $i -lt $adapterBox.Items.Count; $i++) {
-            if ($adapterBox.Items[$i].Description -eq 'Realtek PCIe GbE Family Controller') {
-                $realtekIndex = $i
-                break
+        $preferredItemIndex = -1
+        $defaultRoutes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Where-Object NextHop -ne '0.0.0.0' |
+            ForEach-Object {
+                [pscustomobject]@{
+                    InterfaceIndex = [int]$_.InterfaceIndex
+                    EffectiveMetric = Get-RouteEffectiveMetric -Route $_ -Adapters $adapters
+                }
+            } | Sort-Object EffectiveMetric, InterfaceIndex)
+
+        if ($defaultRoutes.Count -gt 0) {
+            for ($i = 0; $i -lt $adapterBox.Items.Count; $i++) {
+                if ([int]$adapterBox.Items[$i].Index -eq [int]$defaultRoutes[0].InterfaceIndex) {
+                    $preferredItemIndex = $i
+                    break
+                }
             }
         }
-        if ($realtekIndex -ge 0) { $adapterBox.SelectedIndex = $realtekIndex }
-        elseif ($adapterBox.Items.Count -gt 0) { $adapterBox.SelectedIndex = 0 }
+
+        if ($preferredItemIndex -lt 0) {
+            for ($i = 0; $i -lt $adapterBox.Items.Count; $i++) {
+                if ([string]$adapterBox.Items[$i].Status -eq 'Up' -and [bool]$adapterBox.Items[$i].IsPhysical) {
+                    $preferredItemIndex = $i
+                    break
+                }
+            }
+        }
+        if ($preferredItemIndex -lt 0) {
+            for ($i = 0; $i -lt $adapterBox.Items.Count; $i++) {
+                if ([string]$adapterBox.Items[$i].Status -eq 'Up') {
+                    $preferredItemIndex = $i
+                    break
+                }
+            }
+        }
+        if ($preferredItemIndex -lt 0 -and $adapterBox.Items.Count -gt 0) { $preferredItemIndex = 0 }
+        if ($preferredItemIndex -ge 0) { $adapterBox.SelectedIndex = $preferredItemIndex }
         $gatewayModeBox.SelectedIndex = 0
     }
 
