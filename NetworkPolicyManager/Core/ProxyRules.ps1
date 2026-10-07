@@ -13,7 +13,7 @@ function Test-OtherRuleUsesProxyToken {
     param(
         [Parameter(Mandatory)][object[]]$Rules,
         [Parameter(Mandatory)][string]$ExcludeRuleId,
-        [Parameter(Mandatory)][string]$Token
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Token
     )
 
     if ([string]::IsNullOrWhiteSpace($Token)) { return $false }
