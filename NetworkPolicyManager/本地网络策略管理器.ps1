@@ -402,23 +402,160 @@ function Test-IPv4Address {
     [Net.IPAddress]::TryParse($Value, [ref]$address) -and $address.AddressFamily -eq 'InterNetwork'
 }
 
+function Get-ObjectPropertyValue {
+    param(
+        [Parameter(Mandatory)]$Object,
+        [Parameter(Mandatory)][string]$Name,
+        $Default = $null
+    )
+    if ($Object.PSObject.Properties.Name -contains $Name -and $null -ne $Object.$Name) {
+        return $Object.$Name
+    }
+    $Default
+}
+
+function Get-AdapterClassification {
+    param([Parameter(Mandatory)]$Adapter)
+
+    $name = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'Name' -Default '')
+    $description = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'InterfaceDescription' -Default '')
+    $hardware = [bool](Get-ObjectPropertyValue -Object $Adapter -Name 'HardwareInterface' -Default $false)
+    $virtualFlag = [bool](Get-ObjectPropertyValue -Object $Adapter -Name 'Virtual' -Default $false)
+    $media = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'MediaType' -Default '')
+    $physicalMedia = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'PhysicalMediaType' -Default '')
+    $text = "$name $description $media $physicalMedia"
+
+    $provider = ''
+    if ($text -match '(?i)Hyper-V|vEthernet') { $provider = 'Hyper-V' }
+    elseif ($text -match '(?i)VMware') { $provider = 'VMware' }
+    elseif ($text -match '(?i)VirtualBox|VBox') { $provider = 'VirtualBox' }
+    elseif ($text -match '(?i)WSL|Windows Subsystem for Linux') { $provider = 'WSL' }
+    elseif ($text -match '(?i)Docker') { $provider = 'Docker' }
+    elseif ($text -match '(?i)Wintun|WireGuard') { $provider = 'Wintun/WireGuard' }
+    elseif ($text -match '(?i)TAP|TUN|OpenVPN') { $provider = 'TAP/TUN' }
+    elseif ($text -match '(?i)ZeroTier') { $provider = 'ZeroTier' }
+    elseif ($text -match '(?i)Tailscale') { $provider = 'Tailscale' }
+    elseif ($text -match '(?i)VPN|Fortinet|AnyConnect|GlobalProtect') { $provider = 'VPN' }
+
+    $isWireless = $text -match '(?i)802.11|Wi-?Fi|Wireless|WLAN'
+    $isBluetooth = $text -match '(?i)Bluetooth'
+    $isTunnel = $text -match '(?i)Tunnel|Teredo|6to4|isatap|Wintun|WireGuard|TAP|TUN|VPN|ZeroTier|Tailscale'
+    $isVirtual = $virtualFlag -or -not $hardware -or -not [string]::IsNullOrWhiteSpace($provider) -or
+        $text -match '(?i)Virtual|vEthernet|VMware|VirtualBox|Hyper-V|WSL|Docker'
+    $isLoopback = $text -match '(?i)Loopback'
+
+    $kind = if ($isLoopback) {
+        'Loopback'
+    } elseif ($isTunnel) {
+        'Tunnel/VPN'
+    } elseif ($isVirtual) {
+        'Virtual'
+    } elseif ($isWireless) {
+        'Wi-Fi'
+    } elseif ($isBluetooth) {
+        'Bluetooth'
+    } elseif ($hardware) {
+        'Ethernet'
+    } else {
+        'Other'
+    }
+
+    [pscustomobject]@{
+        Kind = $kind
+        IsPhysical = [bool]($hardware -and -not $isVirtual)
+        IsVirtual = [bool]$isVirtual
+        IsWireless = [bool]$isWireless
+        IsTunnel = [bool]$isTunnel
+        VirtualProvider = $provider
+        MediaType = $media
+        PhysicalMediaType = $physicalMedia
+    }
+}
+
 function Get-Adapters {
+    $ipInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+    $metricByIndex = @{}
+    foreach ($ipInterface in $ipInterfaces) {
+        $metricByIndex[[int]$ipInterface.InterfaceIndex] = [int]$ipInterface.InterfaceMetric
+    }
+
     @(
         Get-NetAdapter -IncludeHidden -ErrorAction Stop |
             Where-Object { $_.Status -ne 'Not Present' -and $_.InterfaceDescription -notmatch '^WAN Miniport' } |
-            Sort-Object @{ Expression = { if ($_.HardwareInterface) { 0 } else { 1 } } }, Name |
             ForEach-Object {
+                $classification = Get-AdapterClassification -Adapter $_
+                $index = [int]$_.ifIndex
+                $metric = if ($metricByIndex.ContainsKey($index)) { [int]$metricByIndex[$index] } else { 0 }
+                $providerSuffix = if ([string]::IsNullOrWhiteSpace([string]$classification.VirtualProvider)) {
+                    ''
+                } else {
+                    " / $($classification.VirtualProvider)"
+                }
                 [pscustomobject]@{
                     Name = [string]$_.Name
                     Description = [string]$_.InterfaceDescription
                     Guid = Get-NormalizedGuid -Value ([string]$_.InterfaceGuid)
-                    Index = [int]$_.ifIndex
+                    Index = $index
                     Status = [string]$_.Status
                     Hardware = [bool]$_.HardwareInterface
-                    Display = '{0}  |  {1}  |  {2}' -f $_.Name, $_.InterfaceDescription, $_.Status
+                    Kind = [string]$classification.Kind
+                    IsPhysical = [bool]$classification.IsPhysical
+                    IsVirtual = [bool]$classification.IsVirtual
+                    IsWireless = [bool]$classification.IsWireless
+                    IsTunnel = [bool]$classification.IsTunnel
+                    VirtualProvider = [string]$classification.VirtualProvider
+                    MediaType = [string]$classification.MediaType
+                    PhysicalMediaType = [string]$classification.PhysicalMediaType
+                    InterfaceMetric = $metric
+                    LinkSpeed = [string](Get-ObjectPropertyValue -Object $_ -Name 'LinkSpeed' -Default '')
+                    MacAddress = [string](Get-ObjectPropertyValue -Object $_ -Name 'MacAddress' -Default '')
+                    Display = '{0}  |  {1}{2}  |  {3}  |  Metric {4}' -f $_.Name, $classification.Kind, $providerSuffix, $_.Status, $metric
                 }
-            }
+            } |
+            Sort-Object @{ Expression = {
+                switch ([string]$_.Kind) {
+                    'Ethernet' { 0 }
+                    'Wi-Fi' { 1 }
+                    'Virtual' { 2 }
+                    'Tunnel/VPN' { 3 }
+                    default { 4 }
+                }
+            } }, Name
     )
+}
+
+function Get-AdapterByIndex {
+    param(
+        [Parameter(Mandatory)][int]$InterfaceIndex,
+        [object[]]$Adapters = $(Get-Adapters)
+    )
+    @($Adapters | Where-Object Index -eq $InterfaceIndex | Select-Object -First 1)
+}
+
+function Get-RouteInterfaceMetric {
+    param(
+        [Parameter(Mandatory)]$Route,
+        [object[]]$Adapters = $null
+    )
+
+    if ($Route.PSObject.Properties.Name -contains 'InterfaceMetric' -and $null -ne $Route.InterfaceMetric) {
+        try { return [int]$Route.InterfaceMetric } catch { }
+    }
+    if ($null -ne $Adapters) {
+        $match = @(Get-AdapterByIndex -InterfaceIndex ([int]$Route.InterfaceIndex) -Adapters $Adapters)
+        if ($match.Count -gt 0) { return [int]$match[0].InterfaceMetric }
+    }
+    0
+}
+
+function Get-RouteEffectiveMetric {
+    param(
+        [Parameter(Mandatory)]$Route,
+        [object[]]$Adapters = $null
+    )
+    $routeMetric = Get-RoutePropertyInt -Route $Route -Name 'RouteMetric'
+    $interfaceMetric = Get-RouteInterfaceMetric -Route $Route -Adapters $Adapters
+    $routeMetric + $interfaceMetric
 }
 
 function Resolve-Adapter {
@@ -454,17 +591,26 @@ function Get-RuleGateway {
     if ($null -eq $Routes) {
         $Routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
     }
-    $route = $Routes |
+
+    $candidates = @($Routes |
         Where-Object {
             $_.DestinationPrefix -eq '0.0.0.0/0' -and
-            $_.InterfaceIndex -eq $Adapter.Index -and $_.NextHop -ne '0.0.0.0'
+            $_.InterfaceIndex -eq $Adapter.Index -and
+            $_.NextHop -ne '0.0.0.0'
         } |
-        Sort-Object RouteMetric |
-        Select-Object -First 1
-    if ($null -eq $route) {
+        ForEach-Object {
+            [pscustomobject]@{
+                Route = $_
+                EffectiveMetric = (Get-RoutePropertyInt -Route $_ -Name 'RouteMetric') + [int]$Adapter.InterfaceMetric
+                RouteMetric = Get-RoutePropertyInt -Route $_ -Name 'RouteMetric'
+            }
+        } |
+        Sort-Object EffectiveMetric, RouteMetric)
+
+    if ($candidates.Count -eq 0) {
         throw "网卡「$($Adapter.Name)」当前没有 IPv4 默认网关。"
     }
-    [string]$route.NextHop
+    [string]$candidates[0].Route.NextHop
 }
 
 function Get-StateEntry {
@@ -595,21 +741,38 @@ function Get-NetworkPolicyDiscovery {
             Index = $adapter.Index
             Status = $adapter.Status
             Hardware = $adapter.Hardware
+            Kind = $adapter.Kind
+            IsPhysical = $adapter.IsPhysical
+            IsVirtual = $adapter.IsVirtual
+            IsWireless = $adapter.IsWireless
+            IsTunnel = $adapter.IsTunnel
+            VirtualProvider = $adapter.VirtualProvider
+            InterfaceMetric = $adapter.InterfaceMetric
+            LinkSpeed = $adapter.LinkSpeed
+            MacAddress = $adapter.MacAddress
             IPv4 = @($addresses)
         }
     }
 
     $defaultRoutes = @($snapshot.Routes | Where-Object {
         $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0'
-    } | Sort-Object RouteMetric | ForEach-Object {
+    } | ForEach-Object {
+        $route = $_
+        $adapter = @(Get-AdapterByIndex -InterfaceIndex ([int]$route.InterfaceIndex) -Adapters $snapshot.Adapters)
+        $adapterInfo = if ($adapter.Count -gt 0) { $adapter[0] } else { $null }
         [pscustomobject]@{
-            Destination = [string]$_.DestinationPrefix
-            InterfaceIndex = [int]$_.InterfaceIndex
-            InterfaceAlias = [string]$_.InterfaceAlias
-            Gateway = [string]$_.NextHop
-            Metric = [int]$_.RouteMetric
+            Destination = [string]$route.DestinationPrefix
+            InterfaceIndex = [int]$route.InterfaceIndex
+            InterfaceAlias = [string]$route.InterfaceAlias
+            AdapterKind = if ($null -eq $adapterInfo) { 'Unknown' } else { [string]$adapterInfo.Kind }
+            IsVirtual = $null -ne $adapterInfo -and [bool]$adapterInfo.IsVirtual
+            VirtualProvider = if ($null -eq $adapterInfo) { '' } else { [string]$adapterInfo.VirtualProvider }
+            Gateway = [string]$route.NextHop
+            RouteMetric = Get-RoutePropertyInt -Route $route -Name 'RouteMetric'
+            InterfaceMetric = if ($null -eq $adapterInfo) { 0 } else { [int]$adapterInfo.InterfaceMetric }
+            EffectiveMetric = Get-RouteEffectiveMetric -Route $route -Adapters $snapshot.Adapters
         }
-    })
+    } | Sort-Object EffectiveMetric, RouteMetric, InterfaceIndex)
 
     $specificRoutes = @($snapshot.Routes | Where-Object {
         $_.DestinationPrefix -ne '0.0.0.0/0' -and
@@ -663,6 +826,9 @@ function Get-NetworkPolicyDiscovery {
         GeneratedAt = (Get-Date).ToString('o')
         Adapters = @($adapterRows)
         DefaultRoutes = @($defaultRoutes)
+        DefaultRouteCount = @($defaultRoutes).Count
+        HasMultipleDefaultRoutes = @($defaultRoutes).Count -gt 1
+        PreferredDefaultRoute = if (@($defaultRoutes).Count -gt 0) { $defaultRoutes[0] } else { $null }
         SpecificRoutes = @($specificRoutes)
         ProxyBypass = @($proxyRows)
         UnmanagedSpecificRouteCount = @($specificRoutes | Where-Object { -not $_.Managed }).Count
