@@ -91,7 +91,7 @@ $proxyRules = @(
 )
 Assert-Equal (Get-RuleProxyToken -Rule $proxyRules[0]) '10.1.2.3' 'Proxy token /32'
 Assert-True (Test-OtherRuleUsesProxyToken -Rules $proxyRules -ExcludeRuleId 'a' -Token '10.1.2.3') 'Shared proxy token should be detected'
-Assert-True (-not (Test-OtherRuleUsesProxyToken -Rules $proxyRules -ExcludeRuleId 'a' -Token '10.1.2.4')) 'Unshared proxy token should not be detected'
+Assert-True (-not (Test-OtherRuleUsesProxyToken -Rules $proxyRules -ExcludeRuleId 'a' -Token '10.1.2.5')) 'Unshared proxy token should not be detected'
 $cidrProxyRejected = $false
 try {
     [void](Get-RuleProxyToken -Rule ([pscustomobject]@{ Id='x'; Destination='10.1.2.0/24'; BypassProxy=$true }))
