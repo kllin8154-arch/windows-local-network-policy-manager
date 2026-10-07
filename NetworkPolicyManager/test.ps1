@@ -21,11 +21,11 @@ function Invoke-ManagerReadOnly {
     $output
 }
 
-Write-Host '1/6 PowerShell / 配置自检...' -ForegroundColor Cyan
+Write-Host '1/7 PowerShell / 配置自检...' -ForegroundColor Cyan
 $selfTest = Invoke-ManagerReadOnly -Arguments @('-SelfTest')
 Write-Host ($selfTest -join [Environment]::NewLine) -ForegroundColor Green
 
-Write-Host '2/6 自动识别接口...' -ForegroundColor Cyan
+Write-Host '2/7 自动识别接口...' -ForegroundColor Cyan
 $discoverText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Discover')) -join [Environment]::NewLine
 $discover = $discoverText | ConvertFrom-Json
 Write-Host (
@@ -36,7 +36,7 @@ Write-Host (
     ([int]$discover.UnmanagedSpecificRouteCount + [int]$discover.UnmanagedProxyBypassCount)
 ) -ForegroundColor Green
 
-Write-Host '3/6 策略安全审计...' -ForegroundColor Cyan
+Write-Host '3/7 策略安全审计...' -ForegroundColor Cyan
 $auditText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Audit')) -join [Environment]::NewLine
 $audit = $auditText | ConvertFrom-Json
 Write-Host (
@@ -47,7 +47,7 @@ Write-Host (
     [int]$audit.Summary.Warning
 ) -ForegroundColor Green
 
-Write-Host '4/6 IPv4 选路解释...' -ForegroundColor Cyan
+Write-Host '4/7 IPv4 选路解释...' -ForegroundColor Cyan
 $explainText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ExplainAddress', '-Address', '127.0.0.1')) -join [Environment]::NewLine
 $explain = $explainText | ConvertFrom-Json
 if ([string]$explain.Address -ne '127.0.0.1') {
@@ -64,7 +64,30 @@ Write-Host (
     [bool]$explain.ManagedRuleControlsSelectedRoute
 ) -ForegroundColor Green
 
-Write-Host '5/6 规则状态输出...' -ForegroundColor Cyan
+Write-Host '5/7 变更计划 Diff...' -ForegroundColor Cyan
+$rulesText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ListRules')) -join [Environment]::NewLine
+$rules = @($rulesText | ConvertFrom-Json)
+if ($rules.Count -gt 0) {
+    $planText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'PlanRule', '-RuleId', [string]$rules[0].Id, '-Action', 'Apply')) -join [Environment]::NewLine
+    $plan = $planText | ConvertFrom-Json
+    if ($null -eq $plan.PSObject.Properties['Diff']) {
+        throw 'PlanRule 缺少 Diff。'
+    }
+    if ($null -eq $plan.PSObject.Properties['SystemChangeCount']) {
+        throw 'PlanRule 缺少 SystemChangeCount。'
+    }
+    Write-Host (
+        "Plan Rule={0}; Allowed={1}; Diff={2}; SystemChanges={3}" -f
+        [string]$plan.RuleName,
+        [bool]$plan.Allowed,
+        @($plan.Diff).Count,
+        [int]$plan.SystemChangeCount
+    ) -ForegroundColor Green
+} else {
+    Write-Host '当前没有规则，跳过 PlanRule Diff 检查。' -ForegroundColor DarkYellow
+}
+
+Write-Host '6/7 规则状态输出...' -ForegroundColor Cyan
 $statusText = (Invoke-ManagerReadOnly -Arguments @('-DumpStatus')) -join [Environment]::NewLine
 if (-not [string]::IsNullOrWhiteSpace($statusText)) {
     [void]($statusText | ConvertFrom-Json)
@@ -72,7 +95,7 @@ if (-not [string]::IsNullOrWhiteSpace($statusText)) {
 Write-Host '规则状态 JSON 正常。' -ForegroundColor Green
 
 if ($Ui) {
-    Write-Host '6/6 UI Smoke Test...' -ForegroundColor Cyan
+    Write-Host '7/7 UI Smoke Test...' -ForegroundColor Cyan
     $imagePath = Join-Path $PSScriptRoot 'ui-smoke-test.png'
     Remove-Item -LiteralPath $imagePath -Force -ErrorAction SilentlyContinue
     $uiOutput = Invoke-ManagerReadOnly -Arguments @('-UiSmokeTest')
@@ -81,7 +104,7 @@ if ($Ui) {
     }
     Write-Host "UI Smoke Test 完成：$imagePath" -ForegroundColor Green
 } else {
-    Write-Host '6/6 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
+    Write-Host '7/7 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
 }
 
 if ($Mcp) {
