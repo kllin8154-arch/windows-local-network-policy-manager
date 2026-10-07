@@ -66,6 +66,24 @@ server.registerTool("network_policy_audit", {
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, async () => result(await runManager("Audit")));
 
+server.registerTool("network_policy_drift", {
+  title: "检测管理状态漂移",
+  description: "只读。对比 manager-state、规则定义和真实 Windows 路由/ProxyOverride，分类缺失、被外部替换、规则已变化、孤儿状态等漂移。不会自动修复。",
+  inputSchema: z.object({}),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async () => result(await runManager("Drift")));
+
+server.registerTool("network_policy_plan_repair", {
+  title: "生成漂移修复计划",
+  description: "只读。为指定规则把漂移项映射到现有 Apply/Remove Plan，返回同一套 Diff 与 Fingerprint。真正修复仍必须使用现有逐条写工具并再次明确批准。",
+  inputSchema: z.object({
+    ruleId: z.string().min(1),
+  }),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async ({ ruleId }) =>
+  result(await runManager("PlanRepair", ["-RuleId", ruleId])));
+
+
 server.registerTool("network_policy_explain_address", {
   title: "解释 IPv4 最终选路",
   description: "只读。输入一个 IPv4，解释 Windows 当前最终选择的路由、最长前缀候选、匹配的管理器规则以及精确代理绕过状态。",
