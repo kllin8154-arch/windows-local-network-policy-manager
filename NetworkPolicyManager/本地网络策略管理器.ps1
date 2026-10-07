@@ -1014,10 +1014,18 @@ function Get-RulePlan {
     $warnings = [Collections.Generic.List[string]]::new()
     $diff = [Collections.Generic.List[object]]::new()
 
+    if ($Action -eq 'Apply' -and -not [bool]$Rule.Enabled) {
+        $errors.Add("规则「$($Rule.Name)」已禁用。")
+    }
+
     try {
         $adapter = Resolve-Adapter -Rule $Rule -Adapters $snapshot.Adapters
         if ($adapter.Status -ne 'Up') {
-            $warnings.Add("指定网卡当前未连接：$($adapter.Name)")
+            if ($Action -eq 'Apply') {
+                $errors.Add("指定网卡当前未连接：$($adapter.Name)")
+            } else {
+                $warnings.Add("指定网卡当前未连接：$($adapter.Name)")
+            }
         }
         $gateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $snapshot.Routes
     } catch {
@@ -1049,9 +1057,7 @@ function Get-RulePlan {
         }
         $previousGateway = [string]$state.Gateway
         $previousIndex = [int]$state.InterfaceIndex
-        $previousAdapterGuid = Get-NormalizedGuid -Value ([string]$state.AdapterGuid
-
-        )
+        $previousAdapterGuid = Get-NormalizedGuid -Value ([string]$state.AdapterGuid)
         $previousAdapter = @($snapshot.Adapters | Where-Object {
             $_.Guid -eq $previousAdapterGuid
         } | Select-Object -First 1)
@@ -1098,8 +1104,7 @@ function Get-RulePlan {
 
         $previousIndexes = @([int]$state.InterfaceIndex)
         $resolvedPreviousAdapter = @($snapshot.Adapters | Where-Object {
-            $_.Guid -eq (Get-NormalizedGuid -Value ([string]$state.AdapterGuid)
-            )
+            $_.Guid -eq (Get-NormalizedGuid -Value ([string]$state.AdapterGuid))
         } | Select-Object -First 1)
         if ($resolvedPreviousAdapter.Count -gt 0) {
             $previousIndexes += [int]$resolvedPreviousAdapter[0].Index
@@ -1363,7 +1368,13 @@ function Get-RulePlan {
         }
         ResolvedGateway = $gateway
         ExactRoutes = @($exactRoutes)
-        ProxyTokens = @($snapshot.ProxyTokens | Sort-Object)
+        ProxyState = [ordered]@{
+            DesiredToken = $proxyToken
+            DesiredPresent = [bool]$proxyPresent
+            PreviousToken = $previousProxyToken
+            PreviousPresent = [bool]$previousProxyPresent
+            OtherRuleUsesPrevious = [bool]$otherRuleUsesPreviousProxy
+        }
         State = if ($null -eq $state) { $null } else {
             [ordered]@{
                 Destination = [string]$state.Destination
@@ -1420,6 +1431,7 @@ function Get-RulePlan {
         ProxyToken = $proxyToken
         Diff = @($diff)
         ChangeCount = @($diff | Where-Object WillChange).Count
+        SystemChangeCount = @($diff | Where-Object { $_.WillChange -and $_.Resource -ne 'ManagerState' }).Count
         Changes = @($changes)
         Warnings = @($warnings)
         Errors = @($errors)
@@ -2608,6 +2620,61 @@ function Show-DiscoveryDialog {
     })
 
     [void]$dialog.ShowDialog($form)
+}
+
+function Format-PlanForConfirmation {
+    param([Parameter(Mandatory)]$Plan)
+
+    $lines = [Collections.Generic.List[string]]::new()
+    $lines.Add("规则：$($Plan.RuleName)")
+    $lines.Add("动作：$($Plan.Action)")
+    $lines.Add("目标：$($Plan.Destination)")
+    $lines.Add("系统变更：$($Plan.SystemChangeCount) 项")
+    $lines.Add('')
+
+    if (@($Plan.Diff).Count -gt 0) {
+        $lines.Add('变更 Diff')
+        foreach ($entry in @($Plan.Diff)) {
+            $mark = switch ([string]$entry.Operation) {
+                'Add' { '+' }
+                'Remove' { '-' }
+                'Conflict' { '!' }
+                'Blocked' { '!' }
+                'Drift' { '~' }
+                'KeepShared' { '=' }
+                'KeepExternal' { '=' }
+                'Keep' { '=' }
+                default { '·' }
+            }
+            $lines.Add("$mark $($entry.Resource) / $($entry.Operation)")
+            $lines.Add("    $($entry.Reason)")
+        }
+    }
+
+    if (@($Plan.Warnings).Count -gt 0) {
+        $lines.Add('')
+        $lines.Add('警告')
+        foreach ($warning in @($Plan.Warnings)) {
+            $lines.Add("  - $warning")
+        }
+    }
+
+    if (@($Plan.Errors).Count -gt 0) {
+        $lines.Add('')
+        $lines.Add('阻止执行的问题')
+        foreach ($errorText in @($Plan.Errors)) {
+            $lines.Add("  - $errorText")
+        }
+    }
+
+    $lines.Add('')
+    $shortFingerprint = if ([string]$Plan.Fingerprint.Length -gt 12) {
+        [string]$Plan.Fingerprint.Substring(0, 12)
+    } else {
+        [string]$Plan.Fingerprint
+    }
+    $lines.Add("计划指纹：$shortFingerprint…")
+    $lines -join [Environment]::NewLine
 }
 
 function Show-AddressExplainDialog {
@@ -3854,9 +3921,25 @@ $deleteButton.Add_Click({
 $applyButton.Add_Click({
     $rule = Get-SelectedRule
     if ($null -eq $rule) { return }
-    $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+
     try {
-        Apply-RulePolicy -Rule $rule
+        $plan = Get-RulePlan -Rule $rule -Action 'Apply'
+        $message = Format-PlanForConfirmation -Plan $plan
+        if (-not [bool]$plan.Allowed) {
+            [Windows.Forms.MessageBox]::Show($message, '应用计划被阻止', 'OK', 'Error') | Out-Null
+            return
+        }
+
+        $icon = if (@($plan.Warnings).Count -gt 0) { 'Warning' } else { 'Question' }
+        $answer = [Windows.Forms.MessageBox]::Show(
+            $message + [Environment]::NewLine + [Environment]::NewLine + '确认按此计划应用？',
+            '确认应用计划', 'YesNo', $icon)
+        if ($answer -ne 'Yes') { return }
+
+        $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+        Apply-RulePolicy -Rule $rule -ExpectedFingerprint ([string]$plan.Fingerprint)
+        $result = Test-RulePolicy -Rule $rule
+        Write-AppLog -Message "应用后验证：$($rule.Name) | Healthy=$($result.Healthy)"
         Refresh-Grid
     } catch {
         Write-AppLog -Message ("应用失败：" + $_.Exception.Message) -Level 'ERROR'
@@ -3869,23 +3952,51 @@ $applyButton.Add_Click({
 $applyAllButton.Add_Click({
     $enabledRules = @($script:Rules | Where-Object Enabled)
     if ($enabledRules.Count -eq 0) { return }
+
+    $planned = [Collections.Generic.List[object]]::new()
+    $blocked = [Collections.Generic.List[string]]::new()
+    $summary = [Collections.Generic.List[string]]::new()
+    $summary.Add("将检查并应用 $($enabledRules.Count) 条启用规则：")
+    $summary.Add('')
+
+    foreach ($rule in $enabledRules) {
+        $plan = Get-RulePlan -Rule $rule -Action 'Apply'
+        $planned.Add([pscustomobject]@{ Rule = $rule; Plan = $plan })
+        if (-not [bool]$plan.Allowed) {
+            $blocked.Add("$($rule.Name)：$(@($plan.Errors) -join '；')")
+        }
+        $summary.Add("• $($rule.Name)  系统变更=$($plan.SystemChangeCount)  警告=$(@($plan.Warnings).Count)")
+    }
+
+    if ($blocked.Count -gt 0) {
+        [Windows.Forms.MessageBox]::Show(
+            "批量计划存在被阻止的规则，不执行任何修改。" +
+            [Environment]::NewLine + [Environment]::NewLine +
+            ($blocked -join [Environment]::NewLine),
+            '应用全部被阻止', 'OK', 'Error') | Out-Null
+        return
+    }
+
+    $summary.Add('')
+    $summary.Add('每条规则执行前都会再次校验各自的计划指纹；任一规则失效后将停止后续批量操作。')
     $answer = [Windows.Forms.MessageBox]::Show(
-        "将应用 $($enabledRules.Count) 条启用规则。未连接、网关异常或存在冲突的规则会单独报告。是否继续？",
-        '应用全部', 'YesNo', 'Question')
+        $summary -join [Environment]::NewLine,
+        '确认批量应用计划', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
 
     $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
     $errors = [Collections.Generic.List[string]]::new()
     $success = 0
     try {
-        foreach ($rule in $enabledRules) {
+        foreach ($item in @($planned)) {
             try {
-                Apply-RulePolicy -Rule $rule
+                Apply-RulePolicy -Rule $item.Rule -ExpectedFingerprint ([string]$item.Plan.Fingerprint)
                 $success++
             } catch {
-                $message = "$($rule.Name)：$($_.Exception.Message)"
+                $message = "$($item.Rule.Name)：$($_.Exception.Message)"
                 $errors.Add($message)
                 Write-AppLog -Message $message -Level 'ERROR'
+                break
             }
         }
         Refresh-Grid
@@ -3895,9 +4006,9 @@ $applyAllButton.Add_Click({
 
     if ($errors.Count -gt 0) {
         [Windows.Forms.MessageBox]::Show(
-            "成功 $success 条，失败 $($errors.Count) 条。" + [Environment]::NewLine + [Environment]::NewLine +
-            ($errors -join ([Environment]::NewLine + [Environment]::NewLine)),
-            '应用完成（部分失败）', 'OK', 'Warning') | Out-Null
+            "已成功 $success 条；随后停止。" + [Environment]::NewLine + [Environment]::NewLine +
+            ($errors -join [Environment]::NewLine),
+            '批量应用已停止', 'OK', 'Warning') | Out-Null
     } else {
         [Windows.Forms.MessageBox]::Show(
             "已成功应用 $success 条规则。",
@@ -3908,12 +4019,21 @@ $applyAllButton.Add_Click({
 $removeButton.Add_Click({
     $rule = Get-SelectedRule
     if ($null -eq $rule) { return }
-    $answer = [Windows.Forms.MessageBox]::Show(
-        "只撤销规则「$($rule.Name)」当前由本程序管理的路由和代理绕过，保留规则定义。是否继续？",
-        '确认撤销', 'YesNo', 'Question')
-    if ($answer -ne 'Yes') { return }
+
     try {
-        Remove-RulePolicy -Rule $rule
+        $plan = Get-RulePlan -Rule $rule -Action 'Remove'
+        $message = Format-PlanForConfirmation -Plan $plan
+        if (-not [bool]$plan.Allowed) {
+            [Windows.Forms.MessageBox]::Show($message, '撤销计划被阻止', 'OK', 'Error') | Out-Null
+            return
+        }
+
+        $answer = [Windows.Forms.MessageBox]::Show(
+            $message + [Environment]::NewLine + [Environment]::NewLine + '确认只撤销本程序拥有的资源？',
+            '确认撤销计划', 'YesNo', 'Warning')
+        if ($answer -ne 'Yes') { return }
+
+        Remove-RulePolicy -Rule $rule -ExpectedFingerprint ([string]$plan.Fingerprint)
         Refresh-Grid
     } catch {
         Write-AppLog -Message ("撤销失败：" + $_.Exception.Message) -Level 'ERROR'
@@ -3989,7 +4109,7 @@ $toolTip.SetToolTip($refreshButton, '刷新规则实际状态（F5）')
 $toolTip.SetToolTip($searchBox, '按规则名称、目标地址、网卡、网关或状态搜索（Ctrl+F）')
 $toolTip.SetToolTip($backupButton, '导出规则定义备份，不包含系统路由状态')
 $toolTip.SetToolTip($restoreButton, '导入规则备份；不会立即修改 Windows 网络')
-$toolTip.SetToolTip($applyButton, '应用当前规则到 Windows')
+$toolTip.SetToolTip($applyButton, '先生成变更 Diff，再确认应用到 Windows')
 $toolTip.SetToolTip($testButton, '只读诊断 Windows 实际选路和代理状态')
 
 $isAdministrator = Test-IsAdministrator
