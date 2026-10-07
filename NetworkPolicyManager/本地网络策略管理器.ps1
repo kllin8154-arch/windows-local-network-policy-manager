@@ -1228,12 +1228,17 @@ function Get-AddressExplanation {
 
         $range = Get-PrefixRange -Prefix $prefix
         $routeMetric = Get-RoutePropertyInt -Route $route -Name 'RouteMetric'
-        $interfaceMetric = Get-RoutePropertyInt -Route $route -Name 'InterfaceMetric'
+        $adapterMatch = @(Get-AdapterByIndex -InterfaceIndex ([int]$route.InterfaceIndex) -Adapters $snapshot.Adapters)
+        $adapterInfo = if ($adapterMatch.Count -gt 0) { $adapterMatch[0] } else { $null }
+        $interfaceMetric = Get-RouteInterfaceMetric -Route $route -Adapters $snapshot.Adapters
         $candidateRoutes.Add([pscustomobject]@{
             Destination = $prefix
             PrefixLength = [int]$range.PrefixLength
             InterfaceIndex = [int]$route.InterfaceIndex
             InterfaceAlias = [string]$route.InterfaceAlias
+            AdapterKind = if ($null -eq $adapterInfo) { 'Unknown' } else { [string]$adapterInfo.Kind }
+            IsVirtual = $null -ne $adapterInfo -and [bool]$adapterInfo.IsVirtual
+            VirtualProvider = if ($null -eq $adapterInfo) { '' } else { [string]$adapterInfo.VirtualProvider }
             Gateway = [string]$route.NextHop
             RouteMetric = $routeMetric
             InterfaceMetric = $interfaceMetric
@@ -1264,14 +1269,19 @@ function Get-AddressExplanation {
         if ($selectedPrefix -like '*/*') {
             try { $selectedPrefixLength = [int]$selectedPrefix.Split('/')[1] } catch { }
         }
+        $selectedAdapterMatches = @(Get-AdapterByIndex -InterfaceIndex ([int]$r.InterfaceIndex) -Adapters $snapshot.Adapters)
+        $selectedAdapter = if ($selectedAdapterMatches.Count -gt 0) { $selectedAdapterMatches[0] } else { $null }
         $selected = [pscustomobject]@{
             Destination = $selectedPrefix
             PrefixLength = $selectedPrefixLength
             InterfaceIndex = [int]$r.InterfaceIndex
             InterfaceAlias = [string]$r.InterfaceAlias
+            AdapterKind = if ($null -eq $selectedAdapter) { 'Unknown' } else { [string]$selectedAdapter.Kind }
+            IsVirtual = $null -ne $selectedAdapter -and [bool]$selectedAdapter.IsVirtual
+            VirtualProvider = if ($null -eq $selectedAdapter) { '' } else { [string]$selectedAdapter.VirtualProvider }
             Gateway = [string]$r.NextHop
             RouteMetric = Get-RoutePropertyInt -Route $r -Name 'RouteMetric'
-            InterfaceMetric = Get-RoutePropertyInt -Route $r -Name 'InterfaceMetric'
+            InterfaceMetric = Get-RouteInterfaceMetric -Route $r -Adapters $snapshot.Adapters
         }
         $selected | Add-Member -NotePropertyName EffectiveMetric -NotePropertyValue (
             [int]$selected.RouteMetric + [int]$selected.InterfaceMetric
@@ -1317,6 +1327,9 @@ function Get-AddressExplanation {
             PrefixLength = [int]$range.PrefixLength
             Enabled = [bool]$rule.Enabled
             ExpectedAdapter = if ($null -eq $adapter) { [string]$rule.AdapterDescription } else { [string]$adapter.Name }
+            AdapterKind = if ($null -eq $adapter) { 'Unknown' } else { [string]$adapter.Kind }
+            IsVirtualAdapter = $null -ne $adapter -and [bool]$adapter.IsVirtual
+            VirtualProvider = if ($null -eq $adapter) { '' } else { [string]$adapter.VirtualProvider }
             AdapterStatus = if ($null -eq $adapter) { 'Unavailable' } else { [string]$adapter.Status }
             ExpectedGateway = $gateway
             BypassProxy = [bool]$rule.BypassProxy
@@ -1341,7 +1354,9 @@ function Get-AddressExplanation {
     $summary = if ($null -eq $selected) {
         "Windows 当前没有为 $Address 选出可用 IPv4 路由。"
     } else {
-        $routeSummary = "$Address → $($selected.Destination) → $($selected.InterfaceAlias)"
+        $kindText = if ([string]$selected.AdapterKind -eq 'Unknown') { '' } else { " [$($selected.AdapterKind)]" }
+        $providerText = if ([string]::IsNullOrWhiteSpace([string]$selected.VirtualProvider)) { '' } else { " / $($selected.VirtualProvider)" }
+        $routeSummary = "$Address → $($selected.Destination) → $($selected.InterfaceAlias)$kindText$providerText"
         if (-not [string]::IsNullOrWhiteSpace([string]$selected.Gateway) -and [string]$selected.Gateway -ne '0.0.0.0') {
             $routeSummary += " → $($selected.Gateway)"
         }
