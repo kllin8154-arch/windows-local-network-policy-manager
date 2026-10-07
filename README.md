@@ -17,7 +17,7 @@
 管理器只维护精确路由和选定的系统代理绕过，不修改默认路由、IP、DHCP 或网卡跃点。
 详细说明见 `NetworkPolicyManager/README.md`。
 
-AI / Agent 调用入口位于 `NetworkPolicyManager/mcp`，通过 MCP 暴露自动发现、规则读取/保存、测试、应用和撤销能力。涉及实际修改 Windows 路由或代理时仍要求明确批准及管理员权限。
+AI / Agent 接口已经拆分：`NetworkPolicyManager/mcp-user` 用于实际网络策略管理，`NetworkPolicyManager/mcp-dev` 用于开发/构建维护；旧 `NetworkPolicyManager/mcp` 仅兼容历史配置。入口说明见 `NetworkPolicyManager/MCP_INDEX.md`。高风险网络变更采用 Audit → Plan Fingerprint → 用户确认 → 安全快照 → 执行 → TestRule。安全与恢复设计见 `docs/SAFETY_BACKUP_RECOVERY.md`。
 
 > 开始使用管理器后，不要再交叉运行旧脚本的 `Apply/Rollback`；旧脚本继续保留作历史备份。
 
@@ -99,3 +99,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\本地网络策略.ps
 ```
 
 回滚只删除本脚本新建的路由，原本已存在的同类路由不会被删除。
+
+
+## 项目优化与安全文档
+
+- `docs/OPTIMIZATION_ROADMAP.md`：后续优化方向与优先级；
+- `docs/SAFETY_BACKUP_RECOVERY.md`：复杂规则、备份、恢复、冲突与 AI 安全边界。
