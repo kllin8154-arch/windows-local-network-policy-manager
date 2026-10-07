@@ -33,11 +33,11 @@ function ConvertFrom-JsonArrayText {
     }
 }
 
-Write-Host '1/7 PowerShell / 配置自检...' -ForegroundColor Cyan
+Write-Host '1/8 PowerShell / 配置自检...' -ForegroundColor Cyan
 $selfTest = Invoke-ManagerReadOnly -Arguments @('-SelfTest')
 Write-Host ($selfTest -join [Environment]::NewLine) -ForegroundColor Green
 
-Write-Host '2/7 自动识别接口...' -ForegroundColor Cyan
+Write-Host '2/8 自动识别接口...' -ForegroundColor Cyan
 $discoverText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Discover')) -join [Environment]::NewLine
 $discover = $discoverText | ConvertFrom-Json
 Write-Host (
@@ -48,7 +48,7 @@ Write-Host (
     ([int]$discover.UnmanagedSpecificRouteCount + [int]$discover.UnmanagedProxyBypassCount)
 ) -ForegroundColor Green
 
-Write-Host '3/7 策略安全审计...' -ForegroundColor Cyan
+Write-Host '3/8 策略安全审计...' -ForegroundColor Cyan
 $auditText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Audit')) -join [Environment]::NewLine
 $audit = $auditText | ConvertFrom-Json
 Write-Host (
@@ -59,7 +59,7 @@ Write-Host (
     [int]$audit.Summary.Warning
 ) -ForegroundColor Green
 
-Write-Host '4/7 IPv4 选路解释...' -ForegroundColor Cyan
+Write-Host '4/8 IPv4 选路解释...' -ForegroundColor Cyan
 $explainText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ExplainAddress', '-Address', '127.0.0.1')) -join [Environment]::NewLine
 $explain = $explainText | ConvertFrom-Json
 if ([string]$explain.Address -ne '127.0.0.1') {
@@ -76,7 +76,7 @@ Write-Host (
     [bool]$explain.ManagedRuleControlsSelectedRoute
 ) -ForegroundColor Green
 
-Write-Host '5/7 变更计划 Diff...' -ForegroundColor Cyan
+Write-Host '5/8 变更计划 Diff...' -ForegroundColor Cyan
 $rulesText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ListRules')) -join [Environment]::NewLine
 $rules = @(ConvertFrom-JsonArrayText -Text $rulesText)
 if ($rules.Count -gt 0) {
@@ -99,7 +99,34 @@ if ($rules.Count -gt 0) {
     Write-Host '当前没有规则，跳过 PlanRule Diff 检查。' -ForegroundColor DarkYellow
 }
 
-Write-Host '6/7 规则状态输出...' -ForegroundColor Cyan
+Write-Host '6/8 分组与整组计划...' -ForegroundColor Cyan
+$groupsText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ListGroups')) -join [Environment]::NewLine
+$groups = @(ConvertFrom-JsonArrayText -Text $groupsText)
+if ($groups.Count -eq 0 -and $rules.Count -gt 0) {
+    throw 'ListGroups 未返回已有规则对应的分组。'
+}
+if ($groups.Count -gt 0) {
+    $firstGroup = [string]$groups[0].Group
+    $groupArgs = @('-Command', 'PlanGroup', '-Action', 'Apply')
+    if (-not [string]::IsNullOrWhiteSpace($firstGroup)) {
+        $groupArgs += @('-Group', $firstGroup)
+    }
+    $groupPlanText = (Invoke-ManagerReadOnly -Arguments $groupArgs) -join [Environment]::NewLine
+    $groupPlan = $groupPlanText | ConvertFrom-Json
+    if ($null -eq $groupPlan.PSObject.Properties['Plans']) {
+        throw 'PlanGroup 缺少 Plans。'
+    }
+    Write-Host (
+        "Groups={0}; First={1}; Rules={2}; Allowed={3}; SystemChanges={4}" -f
+        $groups.Count,
+        [string]$groups[0].DisplayName,
+        [int]$groupPlan.RuleCount,
+        [bool]$groupPlan.Allowed,
+        [int]$groupPlan.SystemChangeCount
+    ) -ForegroundColor Green
+}
+
+Write-Host '7/8 规则状态输出...' -ForegroundColor Cyan
 $statusText = (Invoke-ManagerReadOnly -Arguments @('-DumpStatus')) -join [Environment]::NewLine
 if (-not [string]::IsNullOrWhiteSpace($statusText)) {
     [void]($statusText | ConvertFrom-Json)
@@ -107,7 +134,7 @@ if (-not [string]::IsNullOrWhiteSpace($statusText)) {
 Write-Host '规则状态 JSON 正常。' -ForegroundColor Green
 
 if ($Ui) {
-    Write-Host '7/7 UI Smoke Test...' -ForegroundColor Cyan
+    Write-Host '8/8 UI Smoke Test...' -ForegroundColor Cyan
     $imagePath = Join-Path $PSScriptRoot 'ui-smoke-test.png'
     Remove-Item -LiteralPath $imagePath -Force -ErrorAction SilentlyContinue
     $uiOutput = Invoke-ManagerReadOnly -Arguments @('-UiSmokeTest')
@@ -116,7 +143,7 @@ if ($Ui) {
     }
     Write-Host "UI Smoke Test 完成：$imagePath" -ForegroundColor Green
 } else {
-    Write-Host '7/7 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
+    Write-Host '8/8 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
 }
 
 if ($Mcp) {
