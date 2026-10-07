@@ -431,10 +431,10 @@ function Get-AdapterClassification {
     elseif ($text -match '(?i)VirtualBox|VBox') { $provider = 'VirtualBox' }
     elseif ($text -match '(?i)WSL|Windows Subsystem for Linux') { $provider = 'WSL' }
     elseif ($text -match '(?i)Docker') { $provider = 'Docker' }
-    elseif ($text -match '(?i)Wintun|WireGuard') { $provider = 'Wintun/WireGuard' }
-    elseif ($text -match '(?i)TAP|TUN|OpenVPN') { $provider = 'TAP/TUN' }
-    elseif ($text -match '(?i)ZeroTier') { $provider = 'ZeroTier' }
     elseif ($text -match '(?i)Tailscale') { $provider = 'Tailscale' }
+    elseif ($text -match '(?i)ZeroTier') { $provider = 'ZeroTier' }
+    elseif ($text -match '(?i)Wintun|WireGuard') { $provider = 'Wintun/WireGuard' }
+    elseif ($text -match '(?i)OpenVPN|\bTAP\b|\bTUN\b') { $provider = 'TAP/TUN' }
     elseif ($text -match '(?i)VPN|Fortinet|AnyConnect|GlobalProtect') { $provider = 'VPN' }
 
     $isWireless = $text -match '(?i)802.11|Wi-?Fi|Wireless|WLAN'
