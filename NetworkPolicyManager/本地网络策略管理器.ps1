@@ -784,6 +784,19 @@ function Get-StateDriftReport {
         }
 
         $rule = $ruleMatches[0]
+        if (-not [bool]$rule.Enabled -and ([bool]$state.RouteOwned -or [bool]$state.ProxyOwned)) {
+            $items.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'DisabledRuleStillManaged'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Resource = 'ManagerState'
+                Repairable = $true
+                ManualOnly = $false
+                Message = '规则已经禁用，但 manager-state 仍声明拥有系统资源。建议生成 Remove 修复计划，只撤销明确拥有的资源。'
+            })
+        }
+
         $statePrefix = ''
         try { $statePrefix = ConvertTo-NormalizedPrefix -Value ([string]$state.Destination) } catch {
             $statePrefix = [string]$state.Destination
@@ -1324,7 +1337,11 @@ function Get-RulePlan {
         }
         $gateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $snapshot.Routes
     } catch {
-        $errors.Add($_.Exception.Message)
+        if ($Action -eq 'Apply') {
+            $errors.Add($_.Exception.Message)
+        } else {
+            $warnings.Add("撤销时不依赖当前规则出口解析：$($_.Exception.Message)")
+        }
     }
 
     $exactRoutes = @($snapshot.Routes | Where-Object DestinationPrefix -eq $prefix |
@@ -1344,6 +1361,7 @@ function Get-RulePlan {
     $previousIndex = 0
     $previousAdapterGuid = ''
     $previousRoutePresent = $false
+    $previousStateRoutes = @()
     $previousRouteOwned = $null -ne $state -and [bool]$state.RouteOwned
 
     if ($null -ne $state) {
@@ -1362,11 +1380,20 @@ function Get-RulePlan {
         }
         $acceptablePreviousIndexes = @($acceptablePreviousIndexes | Where-Object { $_ -gt 0 } | Select-Object -Unique)
 
-        $previousRoutePresent = @($snapshot.Routes | Where-Object {
+        $previousStateRoutes = @($snapshot.Routes | Where-Object {
             [string]$_.DestinationPrefix -eq $previousDestination -and
             [string]$_.NextHop -eq $previousGateway -and
             ($acceptablePreviousIndexes.Count -eq 0 -or [int]$_.InterfaceIndex -in $acceptablePreviousIndexes)
-        }).Count -gt 0
+        } | Sort-Object InterfaceIndex, NextHop, RouteMetric | ForEach-Object {
+            [pscustomobject]@{
+                Destination = [string]$_.DestinationPrefix
+                InterfaceIndex = [int]$_.InterfaceIndex
+                InterfaceAlias = [string]$_.InterfaceAlias
+                Gateway = [string]$_.NextHop
+                Metric = [int]$_.RouteMetric
+            }
+        })
+        $previousRoutePresent = $previousStateRoutes.Count -gt 0
     }
 
     $desired = if ($null -eq $adapter -or [string]::IsNullOrWhiteSpace($gateway)) {
@@ -1663,6 +1690,7 @@ function Get-RulePlan {
         }
         ResolvedGateway = $gateway
         ExactRoutes = @($exactRoutes)
+        PreviousStateRoutes = @($previousStateRoutes)
         ProxyState = [ordered]@{
             DesiredToken = $proxyToken
             DesiredPresent = [bool]$proxyPresent
