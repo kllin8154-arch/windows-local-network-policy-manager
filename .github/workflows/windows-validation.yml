@@ -63,6 +63,7 @@ jobs:
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\package-portable.ps1"
 
       - name: Upload portable package
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: LocalNetworkPolicyManager-Portable-win-x64
