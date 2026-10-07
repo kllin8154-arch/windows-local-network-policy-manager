@@ -257,7 +257,71 @@ function Get-SafetyBackupList {
 function Get-SafetyBackupById {
     param([Parameter(Mandatory)][string]$Id)
 
-    if ($Id -notmatch '^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}
+    if ($Id.Length -ne 24 -or $Id -notmatch '^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}') {
+        throw '备份 Id 格式无效。'
+    }
+    $path = Join-Path $script:BackupRoot ("snapshot-$Id.json")
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "找不到安全快照：$Id"
+    }
+    $sidecar = $path + '.sha256'
+    if (-not (Test-Path -LiteralPath $sidecar)) {
+        throw "安全快照缺少校验文件：$Id"
+    }
+    $expected = (Get-Content -LiteralPath $sidecar -Raw -Encoding ASCII).Trim().ToLowerInvariant()
+    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expected -ne $actual) {
+        throw "安全快照完整性校验失败：$Id"
+    }
+    $parsed = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$parsed.ComputerName -ne $env:COMPUTERNAME) {
+        throw "安全快照来自其他计算机：$($parsed.ComputerName)。禁止直接还原。"
+    }
+    $parsed
+}
+
+function Restore-RulesFromSafetyBackup {
+    param([Parameter(Mandatory)][string]$Id)
+
+    $backup = Get-SafetyBackupById -Id $Id
+    $before = New-SafetySnapshot -Reason 'before-restore-rules' -RuleId $Id
+
+    $restored = foreach ($rule in @($backup.Rules)) {
+        [pscustomobject]@{
+            Id = [string]$rule.Id
+            Name = [string]$rule.Name
+            Destination = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
+            AdapterGuid = Get-NormalizedGuid -Value ([string]$rule.AdapterGuid)
+            AdapterDescription = [string]$rule.AdapterDescription
+            GatewayMode = if ([string]$rule.GatewayMode -eq 'Auto') { 'Auto' } else { 'Manual' }
+            Gateway = if ([string]$rule.GatewayMode -eq 'Auto') { '' } else { [string]$rule.Gateway }
+            BypassProxy = [bool]$rule.BypassProxy
+            Enabled = [bool]$rule.Enabled
+            OwnExistingRoute = $false
+            OwnExistingProxy = $false
+        }
+    }
+
+    $oldRules = @($script:Rules)
+    try {
+        $script:Rules = @($restored)
+        Assert-Configuration
+        Save-Rules
+        Write-AppLog -Message "已从安全快照恢复规则定义：$Id；所有权标记已清除。"
+        [pscustomobject]@{
+            Restored = $true
+            BackupId = $Id
+            RuleCount = $script:Rules.Count
+            PreRestoreBackupId = $before.Id
+            SystemNetworkChanged = $false
+            OwnershipReset = $true
+        }
+    } catch {
+        $script:Rules = $oldRules
+        throw
+    }
+}
+
 function Get-NormalizedGuid {
     param([AllowEmptyString()][string]$Value)
 
