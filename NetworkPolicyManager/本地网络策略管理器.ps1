@@ -97,11 +97,21 @@ function Write-JsonAtomic {
 }
 
 function Save-Rules {
-    Write-JsonAtomic -Path $script:RulesPath -Value @($script:Rules) -Depth 8
+    $lock = Enter-MutationLock
+    try {
+        Write-JsonAtomic -Path $script:RulesPath -Value @($script:Rules) -Depth 8
+    } finally {
+        Exit-MutationLock -Mutex $lock
+    }
 }
 
 function Save-State {
-    Write-JsonAtomic -Path $script:StatePath -Value @($script:State) -Depth 8
+    $lock = Enter-MutationLock
+    try {
+        Write-JsonAtomic -Path $script:StatePath -Value @($script:State) -Depth 8
+    } finally {
+        Exit-MutationLock -Mutex $lock
+    }
 }
 
 function Enter-MutationLock {
@@ -2834,17 +2844,7 @@ function Restore-RulesFromFile {
         '确认替换当前规则', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
 
-    $safetyPath = Join-Path $script:AppRoot (
-        'network-rules-before-import-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'
-    )
-    [pscustomobject]@{
-        Format = 'windows-local-network-policy-manager/rules-backup'
-        Version = 1
-        ExportedAt = (Get-Date).ToString('o')
-        ComputerName = $env:COMPUTERNAME
-        Reason = 'automatic-backup-before-import'
-        Rules = @($script:Rules)
-    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $safetyPath -Encoding UTF8
+    $safetySnapshot = New-SafetySnapshot -Reason 'before-import-rule-backup'
 
     $normalized = foreach ($rule in $incoming) {
         [pscustomobject]@{
@@ -2868,10 +2868,10 @@ function Restore-RulesFromFile {
         Assert-Configuration
         Save-Rules
         Write-AppLog -Message "已从备份替换为 $($script:Rules.Count) 条规则定义：$($dialog.FileName)"
-        Write-AppLog -Message "导入前安全备份：$safetyPath"
+        Write-AppLog -Message "导入前安全快照：$($safetySnapshot.Id)"
         [Windows.Forms.MessageBox]::Show(
             "规则导入完成。" + [Environment]::NewLine +
-            "导入前的规则已自动备份到：" + [Environment]::NewLine + $safetyPath,
+            "导入前安全快照：" + $safetySnapshot.Id,
             '导入完成', 'OK', 'Information') | Out-Null
         Refresh-Grid
     } catch {
@@ -2885,6 +2885,7 @@ function Save-NewRule {
     if ($null -eq $newRule) { return }
     $oldRules = @($script:Rules)
     try {
+        [void](New-SafetySnapshot -Reason 'before-gui-add-rule')
         $script:Rules += $newRule
         Assert-Configuration
         Save-Rules
@@ -2904,6 +2905,8 @@ function Edit-SelectedRule {
     }
     $newRule = Show-RuleEditor -Rule $oldRule
     if ($null -eq $newRule) { return }
+
+    [void](New-SafetySnapshot -Reason 'before-gui-edit-rule' -RuleId ([string]$oldRule.Id))
 
     $policyChanged =
         (ConvertTo-NormalizedPrefix -Value ([string]$oldRule.Destination)) -ne [string]$newRule.Destination -or
