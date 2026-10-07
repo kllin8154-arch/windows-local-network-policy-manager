@@ -795,12 +795,21 @@ function Get-NetworkPolicyDiscovery {
             } catch { }
         }
         $stateEntry = if ($null -eq $matchedRule) { $null } else { Get-StateEntry -Id ([string]$matchedRule.Id) }
+        $routeAdapterMatches = @(Get-AdapterByIndex -InterfaceIndex ([int]$route.InterfaceIndex) -Adapters $snapshot.Adapters)
+        $routeAdapter = if ($routeAdapterMatches.Count -gt 0) { $routeAdapterMatches[0] } else { $null }
+        $routeMetric = Get-RoutePropertyInt -Route $route -Name 'RouteMetric'
+        $interfaceMetric = Get-RouteInterfaceMetric -Route $route -Adapters $snapshot.Adapters
         [pscustomobject]@{
             Destination = $prefix
             InterfaceIndex = [int]$route.InterfaceIndex
             InterfaceAlias = [string]$route.InterfaceAlias
+            AdapterKind = if ($null -eq $routeAdapter) { 'Unknown' } else { [string]$routeAdapter.Kind }
+            IsVirtual = $null -ne $routeAdapter -and [bool]$routeAdapter.IsVirtual
+            VirtualProvider = if ($null -eq $routeAdapter) { '' } else { [string]$routeAdapter.VirtualProvider }
             Gateway = [string]$route.NextHop
-            Metric = [int]$route.RouteMetric
+            RouteMetric = $routeMetric
+            InterfaceMetric = $interfaceMetric
+            EffectiveMetric = $routeMetric + $interfaceMetric
             Managed = $null -ne $matchedRule
             RuleId = if ($null -eq $matchedRule) { '' } else { [string]$matchedRule.Id }
             RuleName = if ($null -eq $matchedRule) { '' } else { [string]$matchedRule.Name }
