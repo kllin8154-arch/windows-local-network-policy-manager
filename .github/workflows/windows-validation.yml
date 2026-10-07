@@ -20,36 +20,46 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @(
-            '.\NetworkPolicyManager\package-portable.ps1',
-            '.\NetworkPolicyManager\本地网络策略管理器.ps1',
-            '.\NetworkPolicyManager\build.ps1',
-            '.\NetworkPolicyManager\test.ps1',
-            '.\NetworkPolicyManager\mcp-user\setup.ps1',
-            '.\NetworkPolicyManager\mcp-dev\setup.ps1'
-          )
+          $files = @(Get-ChildItem '.\NetworkPolicyManager' -Recurse -File -Filter '*.ps1')
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $file),
+              $file.FullName,
               [ref]$tokens,
               [ref]$errors
             )
             if ($errors.Count -gt 0) {
               $errors | ForEach-Object { Write-Error $_.Message }
-              throw "PowerShell parse failed: $file"
+              throw "PowerShell parse failed: $($file.FullName)"
             }
-            Write-Host "PARSE_OK $file"
+            Write-Host "PARSE_OK $($file.FullName)"
           }
+
+      - name: Resolve manager script
+        id: manager
+        shell: powershell
+        run: |
+          $known = @('build.ps1', 'test.ps1', 'package-portable.ps1')
+          $manager = Get-ChildItem '.\NetworkPolicyManager' -File -Filter '*.ps1' |
+            Where-Object { $_.Name -notin $known } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if ($null -eq $manager) { throw 'Manager script not found.' }
+          "path=$($manager.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "MANAGER $($manager.FullName)"
 
       - name: Manager self-test
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\本地网络策略管理器.ps1" -SelfTest
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${{ steps.manager.outputs.path }}" -SelfTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Policy audit
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\本地网络策略管理器.ps1" -Command Audit
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${{ steps.manager.outputs.path }}" -Command Audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build portable package
         shell: powershell
