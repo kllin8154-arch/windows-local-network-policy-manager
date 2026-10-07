@@ -21,11 +21,11 @@ function Invoke-ManagerReadOnly {
     $output
 }
 
-Write-Host '1/4 PowerShell / 配置自检...' -ForegroundColor Cyan
+Write-Host '1/5 PowerShell / 配置自检...' -ForegroundColor Cyan
 $selfTest = Invoke-ManagerReadOnly -Arguments @('-SelfTest')
 Write-Host ($selfTest -join [Environment]::NewLine) -ForegroundColor Green
 
-Write-Host '2/4 自动识别接口...' -ForegroundColor Cyan
+Write-Host '2/5 自动识别接口...' -ForegroundColor Cyan
 $discoverText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Discover')) -join [Environment]::NewLine
 $discover = $discoverText | ConvertFrom-Json
 Write-Host (
@@ -36,7 +36,18 @@ Write-Host (
     ([int]$discover.UnmanagedSpecificRouteCount + [int]$discover.UnmanagedProxyBypassCount)
 ) -ForegroundColor Green
 
-Write-Host '3/4 规则状态输出...' -ForegroundColor Cyan
+Write-Host '3/5 策略安全审计...' -ForegroundColor Cyan
+$auditText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Audit')) -join [Environment]::NewLine
+$audit = $auditText | ConvertFrom-Json
+Write-Host (
+    "Audit Healthy={0}; Critical={1}; Error={2}; Warning={3}" -f
+    [bool]$audit.Healthy,
+    [int]$audit.Summary.Critical,
+    [int]$audit.Summary.Error,
+    [int]$audit.Summary.Warning
+) -ForegroundColor Green
+
+Write-Host '4/5 规则状态输出...' -ForegroundColor Cyan
 $statusText = (Invoke-ManagerReadOnly -Arguments @('-DumpStatus')) -join [Environment]::NewLine
 if (-not [string]::IsNullOrWhiteSpace($statusText)) {
     [void]($statusText | ConvertFrom-Json)
@@ -44,7 +55,7 @@ if (-not [string]::IsNullOrWhiteSpace($statusText)) {
 Write-Host '规则状态 JSON 正常。' -ForegroundColor Green
 
 if ($Ui) {
-    Write-Host '4/4 UI Smoke Test...' -ForegroundColor Cyan
+    Write-Host '5/5 UI Smoke Test...' -ForegroundColor Cyan
     $imagePath = Join-Path $PSScriptRoot 'ui-smoke-test.png'
     Remove-Item -LiteralPath $imagePath -Force -ErrorAction SilentlyContinue
     $uiOutput = Invoke-ManagerReadOnly -Arguments @('-UiSmokeTest')
@@ -53,7 +64,7 @@ if ($Ui) {
     }
     Write-Host "UI Smoke Test 完成：$imagePath" -ForegroundColor Green
 } else {
-    Write-Host '4/4 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
+    Write-Host '5/5 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
 }
 
 if ($Mcp) {
