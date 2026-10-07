@@ -3293,8 +3293,8 @@ function Show-AddressExplainDialog {
 function Show-SafetyCenter {
     $dialog = [Windows.Forms.Form]::new()
     $dialog.Text = '安全中心'
-    $dialog.ClientSize = [Drawing.Size]::new(1060, 680)
-    $dialog.MinimumSize = [Drawing.Size]::new(900, 580)
+    $dialog.ClientSize = [Drawing.Size]::new(1100, 720)
+    $dialog.MinimumSize = [Drawing.Size]::new(940, 620)
     $dialog.StartPosition = 'CenterParent'
     $dialog.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
     $dialog.BackColor = $script:Theme.Background
@@ -3315,11 +3315,19 @@ function Show-SafetyCenter {
     $header.Controls.Add($title)
 
     $sub = [Windows.Forms.Label]::new()
-    $sub.Text = '审计当前规则风险，管理本机安全快照。规则恢复不会直接回放旧 Windows 路由。'
+    $sub.Text = '审计风险 · 检测状态漂移 · 生成指纹修复计划 · 管理本机安全快照；任何修复都需要再次确认。'
     $sub.ForeColor = $script:Theme.MutedText
     $sub.AutoSize = $true
     $sub.Location = [Drawing.Point]::new(20, 49)
     $header.Controls.Add($sub)
+
+    $buttons = [Windows.Forms.FlowLayoutPanel]::new()
+    $buttons.Dock = 'Bottom'
+    $buttons.Height = 58
+    $buttons.Padding = [Windows.Forms.Padding]::new(8, 4, 12, 4)
+    $buttons.FlowDirection = 'RightToLeft'
+    $buttons.BackColor = $script:Theme.Background
+    $dialog.Controls.Add($buttons)
 
     $tabs = [Windows.Forms.TabControl]::new()
     $tabs.Dock = 'Fill'
@@ -3328,6 +3336,10 @@ function Show-SafetyCenter {
     $auditTab = [Windows.Forms.TabPage]::new('策略审计')
     $auditTab.BackColor = $script:Theme.Background
     $tabs.TabPages.Add($auditTab)
+
+    $driftTab = [Windows.Forms.TabPage]::new('状态漂移')
+    $driftTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($driftTab)
 
     $backupTab = [Windows.Forms.TabPage]::new('安全快照')
     $backupTab.BackColor = $script:Theme.Background
@@ -3341,6 +3353,54 @@ function Show-SafetyCenter {
     $auditBox.ForeColor = $script:Theme.WarmText
     $auditBox.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
     $auditTab.Controls.Add($auditBox)
+
+    $driftSplit = [Windows.Forms.SplitContainer]::new()
+    $driftSplit.Dock = 'Fill'
+    $driftSplit.Orientation = 'Horizontal'
+    $driftSplit.SplitterDistance = 330
+    $driftSplit.BackColor = $script:Theme.Border
+    $driftTab.Controls.Add($driftSplit)
+
+    $driftGrid = [Windows.Forms.DataGridView]::new()
+    $driftGrid.Dock = 'Fill'
+    $driftGrid.ReadOnly = $true
+    $driftGrid.AllowUserToAddRows = $false
+    $driftGrid.AllowUserToDeleteRows = $false
+    $driftGrid.AllowUserToResizeRows = $false
+    $driftGrid.RowHeadersVisible = $false
+    $driftGrid.SelectionMode = 'FullRowSelect'
+    $driftGrid.MultiSelect = $false
+    $driftGrid.AutoGenerateColumns = $false
+    $driftGrid.AutoSizeRowsMode = 'AllCells'
+    $driftGrid.DefaultCellStyle.WrapMode = 'True'
+    Initialize-GridTheme -Grid $driftGrid
+    $driftSplit.Panel1.Controls.Add($driftGrid)
+
+    foreach ($spec in @(
+        @('Severity','级别',72),
+        @('Code','类型',180),
+        @('Rule','规则',180),
+        @('Resource','资源',100),
+        @('Repairable','可计划',72),
+        @('Message','说明',330)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'Message') { $column.AutoSizeMode = 'Fill' }
+        [void]$driftGrid.Columns.Add($column)
+    }
+
+    $driftPlanBox = [Windows.Forms.RichTextBox]::new()
+    $driftPlanBox.Dock = 'Fill'
+    $driftPlanBox.ReadOnly = $true
+    $driftPlanBox.BorderStyle = 'None'
+    $driftPlanBox.BackColor = $script:Theme.Surface
+    $driftPlanBox.ForeColor = $script:Theme.WarmText
+    $driftPlanBox.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+    $driftPlanBox.Text = '选择一条可修复漂移，然后点击“生成修复计划”。孤儿状态和外部匹配不会自动取得所有权。'
+    $driftSplit.Panel2.Controls.Add($driftPlanBox)
 
     $backupGrid = [Windows.Forms.DataGridView]::new()
     $backupGrid.Dock = 'Fill'
@@ -3369,22 +3429,47 @@ function Show-SafetyCenter {
         [void]$backupGrid.Columns.Add($column)
     }
 
-    $buttons = [Windows.Forms.FlowLayoutPanel]::new()
-    $buttons.Dock = 'Bottom'
-    $buttons.Height = 58
-    $buttons.Padding = [Windows.Forms.Padding]::new(8, 4, 12, 4)
-    $buttons.FlowDirection = 'RightToLeft'
-    $buttons.BackColor = $script:Theme.Background
-    $dialog.Controls.Add($buttons)
-
     $closeButton = New-UiButton -Text '关闭' -Width 88
     $refreshSafetyButton = New-UiButton -Text '重新审计' -Width 96
     $createSnapshotButton = New-UiButton -Text '创建快照' -Width 96 -Variant 'Accent'
     $restoreSnapshotButton = New-UiButton -Text '恢复所选规则' -Width 112 -Variant 'Danger'
+    $planRepairButton = New-UiButton -Text '生成修复计划' -Width 112 -Variant 'Accent'
+    $executeRepairButton = New-UiButton -Text '按计划修复' -Width 104 -Variant 'Danger'
+    $executeRepairButton.Enabled = $false
+
     $buttons.Controls.Add($closeButton)
+    $buttons.Controls.Add($executeRepairButton)
+    $buttons.Controls.Add($planRepairButton)
     $buttons.Controls.Add($restoreSnapshotButton)
     $buttons.Controls.Add($createSnapshotButton)
     $buttons.Controls.Add($refreshSafetyButton)
+
+    $setDriftPlan = {
+        param($RepairPlan)
+
+        $driftPlanBox.Tag = $RepairPlan
+        if ($null -eq $RepairPlan) {
+            $executeRepairButton.Enabled = $false
+            return
+        }
+
+        $lines = [Collections.Generic.List[string]]::new()
+        $lines.Add("规则：$($RepairPlan.RuleName)")
+        $lines.Add("建议动作：$($RepairPlan.RecommendedAction)")
+        $lines.Add("当前存在漂移：$(if ($RepairPlan.HasDrift) { '是' } else { '否' })")
+        $lines.Add("允许修复：$(if ($RepairPlan.Repairable) { '是' } else { '否' })")
+        $lines.Add('')
+        $lines.Add('漂移项')
+        foreach ($item in @($RepairPlan.DriftItems)) {
+            $lines.Add("[$($item.Severity)] $($item.Code) / $($item.Resource)")
+            $lines.Add("  $($item.Message)")
+        }
+        $lines.Add('')
+        $lines.Add('Current → Planned')
+        $lines.Add((Format-PlanForConfirmation -Plan $RepairPlan.Plan))
+        $driftPlanBox.Text = $lines -join [Environment]::NewLine
+        $executeRepairButton.Enabled = [bool]$RepairPlan.Repairable
+    }
 
     $refreshSafety = {
         $audit = Get-PolicyAudit
@@ -3407,6 +3492,27 @@ function Show-SafetyCenter {
         }
         $auditBox.Text = $lines -join [Environment]::NewLine
 
+        $drift = Get-StateDriftReport
+        $driftTab.Text = "状态漂移  $($drift.DriftCount)"
+        $driftGrid.Rows.Clear()
+        foreach ($item in @($drift.Items)) {
+            $rowIndex = $driftGrid.Rows.Add(
+                [string]$item.Severity,
+                [string]$item.Code,
+                [string]$item.RuleName,
+                [string]$item.Resource,
+                $(if ($item.Repairable) { '是' } elseif ($item.ManualOnly) { '人工' } else { '否' }),
+                [string]$item.Message
+            )
+            $driftGrid.Rows[$rowIndex].Tag = $item
+        }
+        & $setDriftPlan $null
+        $driftPlanBox.Text = if (@($drift.Items).Count -eq 0) {
+            '没有发现 manager-state 与真实 Windows 状态之间的漂移。'
+        } else {
+            "检测到 $($drift.DriftCount) 项 Error/Warning 漂移；另有 $($drift.Summary.Info) 项信息。选择可修复项后生成计划。"
+        }
+
         $backupGrid.Rows.Clear()
         foreach ($backup in @(Get-SafetyBackupList)) {
             $rowIndex = $backupGrid.Rows.Add(
@@ -3426,6 +3532,81 @@ function Show-SafetyCenter {
 
     $closeButton.Add_Click({ $dialog.Close() })
     $refreshSafetyButton.Add_Click({ & $refreshSafety })
+
+    $driftGrid.Add_SelectionChanged({
+        & $setDriftPlan $null
+        if ($driftGrid.SelectedRows.Count -gt 0) {
+            $item = $driftGrid.SelectedRows[0].Tag
+            $driftPlanBox.Text = @(
+                "[$($item.Severity)] $($item.Code)",
+                "规则：$($item.RuleName)",
+                "资源：$($item.Resource)",
+                "可修复：$(if ($item.Repairable) { '是' } elseif ($item.ManualOnly) { '仅人工判断' } else { '否' })",
+                '',
+                [string]$item.Message
+            ) -join [Environment]::NewLine
+        }
+    })
+
+    $planRepairButton.Add_Click({
+        if ($driftGrid.SelectedRows.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show('请先在“状态漂移”中选择一项。', '提示', 'OK', 'Information') | Out-Null
+            return
+        }
+
+        $item = $driftGrid.SelectedRows[0].Tag
+        if ([string]::IsNullOrWhiteSpace([string]$item.RuleId) -or [bool]$item.ManualOnly) {
+            [Windows.Forms.MessageBox]::Show(
+                '该漂移不能自动生成修复执行计划。程序不会猜测孤儿状态或外部资源的所有权。',
+                '需要人工处理', 'OK', 'Warning') | Out-Null
+            return
+        }
+
+        try {
+            $repair = Get-RepairPlan -RuleId ([string]$item.RuleId)
+            & $setDriftPlan $repair
+            $tabs.SelectedTab = $driftTab
+        } catch {
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, '生成修复计划失败', 'OK', 'Error') | Out-Null
+        }
+    })
+
+    $executeRepairButton.Add_Click({
+        $repair = $driftPlanBox.Tag
+        if ($null -eq $repair -or -not [bool]$repair.Repairable) {
+            [Windows.Forms.MessageBox]::Show('当前没有可执行的修复计划。', '提示', 'OK', 'Information') | Out-Null
+            return
+        }
+
+        $message = Format-PlanForConfirmation -Plan $repair.Plan
+        $answer = [Windows.Forms.MessageBox]::Show(
+            "状态漂移修复不会自动接管外部资源。" +
+            [Environment]::NewLine + [Environment]::NewLine +
+            $message +
+            [Environment]::NewLine + [Environment]::NewLine +
+            '确认按此指纹计划执行？执行前会自动创建安全快照。',
+            '确认漂移修复', 'YesNo', 'Warning')
+        if ($answer -ne 'Yes') { return }
+
+        try {
+            $rule = Get-RuleById -Id ([string]$repair.RuleId)
+            if ([string]$repair.RecommendedAction -eq 'Remove') {
+                Remove-RulePolicy -Rule $rule -ExpectedFingerprint ([string]$repair.Fingerprint)
+            } else {
+                Apply-RulePolicy -Rule $rule -ExpectedFingerprint ([string]$repair.Fingerprint)
+                [void](Test-RulePolicy -Rule $rule)
+            }
+            Write-AppLog -Message "漂移修复完成：$($repair.RuleName) | $($repair.RecommendedAction)"
+            Refresh-Grid
+            & $refreshSafety
+        } catch {
+            Write-AppLog -Message ("漂移修复失败：" + $_.Exception.Message) -Level 'ERROR'
+            [Windows.Forms.MessageBox]::Show(
+                $_.Exception.Message + [Environment]::NewLine + '如果状态在计划后发生变化，请重新生成修复计划。',
+                '修复失败', 'OK', 'Error') | Out-Null
+        }
+    })
+
     $createSnapshotButton.Add_Click({
         try {
             $backup = New-SafetySnapshot -Reason 'manual-gui-backup'
@@ -3437,6 +3618,7 @@ function Show-SafetyCenter {
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, '创建快照失败', 'OK', 'Error') | Out-Null
         }
     })
+
     $restoreSnapshotButton.Add_Click({
         if ($backupGrid.SelectedRows.Count -eq 0) {
             [Windows.Forms.MessageBox]::Show('请先选择一个安全快照。', '提示', 'OK', 'Information') | Out-Null
@@ -3474,7 +3656,20 @@ function Show-SafetyCenter {
         }
     })
 
+    $tabs.Add_SelectedIndexChanged({
+        $onDrift = $tabs.SelectedTab -eq $driftTab
+        $planRepairButton.Visible = $onDrift
+        $executeRepairButton.Visible = $onDrift
+        $restoreSnapshotButton.Visible = $tabs.SelectedTab -eq $backupTab
+        $createSnapshotButton.Visible = $tabs.SelectedTab -eq $backupTab
+    })
+
     & $refreshSafety
+    $tabs.SelectedTab = $auditTab
+    $planRepairButton.Visible = $false
+    $executeRepairButton.Visible = $false
+    $restoreSnapshotButton.Visible = $false
+    $createSnapshotButton.Visible = $false
     [void]$dialog.ShowDialog($form)
 }
 
