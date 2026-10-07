@@ -10,7 +10,7 @@
 
 任何真实网络修改固定按以下顺序：
 
-Discover → Audit → PlanRule → 展示 Changes / Warnings → 用户明确确认 → Apply / Remove + 同一 Fingerprint → TestRule
+Discover → Audit → 必要时 ExplainAddress → PlanRule → 展示 Diff / Warnings → 用户明确确认 → Apply / Remove + 同一 Fingerprint → TestRule
 
 如果网络状态在 Plan 后发生变化，Fingerprint 会失效，必须重新计划。
 
@@ -30,8 +30,9 @@ npm run start
 | --- | --- | --- |
 | network_policy_discover | 只读 | 当前网卡、路由、代理、管理状态 |
 | network_policy_audit | 只读 | 重叠、网卡、网关、所有权风险 |
+| network_policy_explain_address | 只读 | 输入 IPv4，解释最终 Windows 选路、候选路由、匹配规则与代理绕过 |
 | network_policy_list_rules | 只读 | 规则定义 |
-| network_policy_plan | 只读 | Apply / Remove 的实时计划与 Fingerprint |
+| network_policy_plan | 只读 | Apply / Remove 的 Current → Planned Diff、系统变更数与 Fingerprint |
 | network_policy_test_rule | 只读 | 规则实际选路诊断 |
 | network_policy_create_backup | 低 | 创建安全快照，不改网络 |
 | network_policy_list_backups | 只读 | 快照及完整性状态 |
