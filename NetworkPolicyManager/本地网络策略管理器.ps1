@@ -3349,7 +3349,7 @@ function Show-AddressExplainDialog {
     $header.Controls.Add($title)
 
     $sub = [Windows.Forms.Label]::new()
-    $sub.Text = '只读查询。按 Windows 最长前缀优先规则解释最终路由，并同时展示匹配的管理器规则和代理绕过。'
+    $sub.Text = '只读查询。按 Windows 最长前缀 + 有效 Metric 解释最终路由；物理/Wi-Fi/虚拟/VPN 类型只用于说明，不用于猜测选路。'
     $sub.ForeColor = $script:Theme.MutedText
     $sub.AutoSize = $true
     $sub.Location = [Drawing.Point]::new(20, 43)
@@ -3412,12 +3412,13 @@ function Show-AddressExplainDialog {
     $routeTab.Controls.Add($routeGrid)
 
     foreach ($spec in @(
-        @('Prefix','目标前缀',170),
-        @('Length','前缀长度',80),
-        @('Adapter','网卡',220),
-        @('Gateway','下一跳',150),
-        @('Metric','Metric',90),
-        @('Selected','最终',75)
+        @('Prefix','目标前缀',150),
+        @('Length','前缀长度',75),
+        @('Adapter','网卡',175),
+        @('Kind','类型',105),
+        @('Gateway','下一跳',135),
+        @('Metric','有效 Metric',90),
+        @('Selected','最终',68)
     )) {
         $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
         $column.Name = $spec[0]
@@ -3440,12 +3441,13 @@ function Show-AddressExplainDialog {
     $ruleTab.Controls.Add($ruleGrid)
 
     foreach ($spec in @(
-        @('Rule','规则',220),
-        @('Prefix','目标前缀',160),
-        @('Adapter','期望网卡',220),
-        @('Gateway','期望网关',135),
-        @('Status','状态',150),
-        @('Controls','控制最终路由',105)
+        @('Rule','规则',190),
+        @('Prefix','目标前缀',145),
+        @('Adapter','期望网卡',170),
+        @('Kind','类型',105),
+        @('Gateway','期望网关',125),
+        @('Status','状态',140),
+        @('Controls','控制最终路由',100)
     )) {
         $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
         $column.Name = $spec[0]
@@ -3476,6 +3478,7 @@ function Show-AddressExplainDialog {
                     [string]$route.Destination,
                     [string]$route.PrefixLength,
                     [string]$route.InterfaceAlias,
+                    $(if ([string]::IsNullOrWhiteSpace([string]$route.VirtualProvider)) { [string]$route.AdapterKind } else { "$($route.AdapterKind) / $($route.VirtualProvider)" }),
                     [string]$route.Gateway,
                     [string]$route.EffectiveMetric,
                     $(if ($isSelected) { '是' } else { '' })
@@ -3487,6 +3490,7 @@ function Show-AddressExplainDialog {
                     [string]$rule.Name,
                     [string]$rule.Destination,
                     [string]$rule.ExpectedAdapter,
+                    $(if ([string]::IsNullOrWhiteSpace([string]$rule.VirtualProvider)) { [string]$rule.AdapterKind } else { "$($rule.AdapterKind) / $($rule.VirtualProvider)" }),
                     [string]$rule.ExpectedGateway,
                     $(if ([string]::IsNullOrWhiteSpace([string]$rule.ResolutionError)) { [string]$rule.Status } else { [string]$rule.ResolutionError }),
                     $(if ($rule.ControlsSelectedRoute) { '是' } else { '' })
@@ -3505,8 +3509,12 @@ function Show-AddressExplainDialog {
             } else {
                 $lines.Add('最终路由')
                 $lines.Add("  前缀：$($result.SelectedRoute.Destination)")
+                $providerText = if ([string]::IsNullOrWhiteSpace([string]$result.SelectedRoute.VirtualProvider)) { '' } else { " / $($result.SelectedRoute.VirtualProvider)" }
                 $lines.Add("  网卡：$($result.SelectedRoute.InterfaceAlias)  [Index $($result.SelectedRoute.InterfaceIndex)]")
+                $lines.Add("  类型：$($result.SelectedRoute.AdapterKind)$providerText")
                 $lines.Add("  下一跳：$($result.SelectedRoute.Gateway)")
+                $lines.Add("  Route Metric：$($result.SelectedRoute.RouteMetric)")
+                $lines.Add("  Interface Metric：$($result.SelectedRoute.InterfaceMetric)")
                 $lines.Add("  Effective Metric：$($result.SelectedRoute.EffectiveMetric)")
             }
             $lines.Add('')
