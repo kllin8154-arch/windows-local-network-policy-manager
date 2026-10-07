@@ -904,6 +904,7 @@ function Get-RulePlan {
     $gateway = ''
     $errors = [Collections.Generic.List[string]]::new()
     $warnings = [Collections.Generic.List[string]]::new()
+    $diff = [Collections.Generic.List[object]]::new()
 
     try {
         $adapter = Resolve-Adapter -Rule $Rule -Adapters $snapshot.Adapters
@@ -918,6 +919,7 @@ function Get-RulePlan {
     $exactRoutes = @($snapshot.Routes | Where-Object DestinationPrefix -eq $prefix |
         Sort-Object InterfaceIndex, NextHop, RouteMetric | ForEach-Object {
             [pscustomobject]@{
+                Destination = $prefix
                 InterfaceIndex = [int]$_.InterfaceIndex
                 InterfaceAlias = [string]$_.InterfaceAlias
                 Gateway = [string]$_.NextHop
@@ -925,26 +927,314 @@ function Get-RulePlan {
             }
         })
 
-    if ($Action -eq 'Apply' -and $null -ne $adapter -and -not [string]::IsNullOrWhiteSpace($gateway)) {
-        $conflicts = @($exactRoutes | Where-Object {
-            $_.InterfaceIndex -ne $adapter.Index -or $_.Gateway -ne $gateway
-        })
-        $previous = Get-StateEntry -Id ([string]$Rule.Id)
-        if ($conflicts.Count -gt 0) {
-            $canReplacePrevious = $null -ne $previous -and [bool]$previous.RouteOwned -and
-                @($conflicts | Where-Object Gateway -ne ([string]$previous.Gateway)).Count -eq 0
-            if (-not $canReplacePrevious) {
-                $errors.Add('目标前缀已存在由其他网卡或网关负责的路由；程序不会覆盖。')
-            }
+    $state = Get-StateEntry -Id ([string]$Rule.Id)
+    $previousDestination = ''
+    $previousGateway = ''
+    $previousIndex = 0
+    $previousAdapterGuid = ''
+    $previousRoutePresent = $false
+    $previousRouteOwned = $null -ne $state -and [bool]$state.RouteOwned
+
+    if ($null -ne $state) {
+        try { $previousDestination = ConvertTo-NormalizedPrefix -Value ([string]$state.Destination) } catch {
+            $previousDestination = [string]$state.Destination
         }
+        $previousGateway = [string]$state.Gateway
+        $previousIndex = [int]$state.InterfaceIndex
+        $previousAdapterGuid = Get-NormalizedGuid -Value ([string]$state.AdapterGuid
+
+        )
+        $previousAdapter = @($snapshot.Adapters | Where-Object {
+            $_.Guid -eq $previousAdapterGuid
+        } | Select-Object -First 1)
+        $acceptablePreviousIndexes = @($previousIndex)
+        if ($previousAdapter.Count -gt 0) {
+            $acceptablePreviousIndexes += [int]$previousAdapter[0].Index
+        }
+        $acceptablePreviousIndexes = @($acceptablePreviousIndexes | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+
+        $previousRoutePresent = @($snapshot.Routes | Where-Object {
+            [string]$_.DestinationPrefix -eq $previousDestination -and
+            [string]$_.NextHop -eq $previousGateway -and
+            ($acceptablePreviousIndexes.Count -eq 0 -or [int]$_.InterfaceIndex -in $acceptablePreviousIndexes)
+        }).Count -gt 0
+    }
+
+    $desired = if ($null -eq $adapter -or [string]::IsNullOrWhiteSpace($gateway)) {
+        $null
+    } else {
+        [pscustomobject]@{
+            Destination = $prefix
+            InterfaceIndex = [int]$adapter.Index
+            InterfaceAlias = [string]$adapter.Name
+            AdapterGuid = [string]$adapter.Guid
+            Gateway = $gateway
+        }
+    }
+
+    $matchingRoutes = if ($null -eq $desired) { @() } else {
+        @($exactRoutes | Where-Object {
+            $_.InterfaceIndex -eq $desired.InterfaceIndex -and $_.Gateway -eq $desired.Gateway
+        })
+    }
+    $conflicts = if ($null -eq $desired) { @() } else {
+        @($exactRoutes | Where-Object {
+            $_.InterfaceIndex -ne $desired.InterfaceIndex -or $_.Gateway -ne $desired.Gateway
+        })
+    }
+
+    $canReplaceConflicts = $false
+    if ($conflicts.Count -gt 0 -and $previousRouteOwned -and
+        -not [string]::IsNullOrWhiteSpace($previousDestination) -and
+        $previousDestination -eq $prefix) {
+
+        $previousIndexes = @([int]$state.InterfaceIndex)
+        $resolvedPreviousAdapter = @($snapshot.Adapters | Where-Object {
+            $_.Guid -eq (Get-NormalizedGuid -Value ([string]$state.AdapterGuid)
+            )
+        } | Select-Object -First 1)
+        if ($resolvedPreviousAdapter.Count -gt 0) {
+            $previousIndexes += [int]$resolvedPreviousAdapter[0].Index
+        }
+        $previousIndexes = @($previousIndexes | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+
+        $foreign = @($conflicts | Where-Object {
+            $_.Gateway -ne $previousGateway -or
+            ($previousIndexes.Count -gt 0 -and $_.InterfaceIndex -notin $previousIndexes)
+        })
+        $canReplaceConflicts = $foreign.Count -eq 0
     }
 
     $proxyToken = ''
     if ([bool]$Rule.BypassProxy) {
         try { $proxyToken = Get-ProxyTokenForRule -Rule $Rule } catch { $errors.Add($_.Exception.Message) }
     }
+    $proxyPresent = -not [string]::IsNullOrWhiteSpace($proxyToken) -and $proxyToken -in @($snapshot.ProxyTokens)
 
-    $state = Get-StateEntry -Id ([string]$Rule.Id)
+    $previousProxyToken = if ($null -eq $state) { '' } else { [string]$state.ProxyToken }
+    $previousProxyOwned = $null -ne $state -and [bool]$state.ProxyOwned
+    $previousProxyPresent = -not [string]::IsNullOrWhiteSpace($previousProxyToken) -and
+        $previousProxyToken -in @($snapshot.ProxyTokens)
+    $otherRuleUsesPreviousProxy = $false
+    if (-not [string]::IsNullOrWhiteSpace($previousProxyToken)) {
+        $otherRuleUsesPreviousProxy = @($script:Rules | Where-Object {
+            $_.Id -ne $Rule.Id -and [bool]$_.BypassProxy -and
+            $(try { (Get-ProxyTokenForRule -Rule $_) -eq $previousProxyToken } catch { $false })
+        }).Count -gt 0
+    }
+
+    if ($Action -eq 'Apply') {
+        if ($null -eq $desired) {
+            $diff.Add([pscustomobject]@{
+                Resource = 'Route'
+                Operation = 'Blocked'
+                WillChange = $false
+                Owned = $false
+                Current = @($exactRoutes)
+                Desired = $null
+                Reason = '无法解析期望网卡或网关。'
+            })
+        } else {
+            $previousDesiredDiffers = $previousRouteOwned -and (
+                $previousDestination -ne $prefix -or
+                $previousGateway -ne $gateway -or
+                (-not [string]::IsNullOrWhiteSpace($previousAdapterGuid) -and
+                 $previousAdapterGuid -ne [string]$adapter.Guid)
+            )
+
+            if ($previousDesiredDiffers) {
+                $diff.Add([pscustomobject]@{
+                    Resource = 'Route'
+                    Operation = if ($previousRoutePresent) { 'Remove' } else { 'Drift' }
+                    WillChange = [bool]$previousRoutePresent
+                    Owned = $true
+                    Current = [pscustomobject]@{
+                        Destination = $previousDestination
+                        InterfaceIndex = $previousIndex
+                        Gateway = $previousGateway
+                    }
+                    Desired = $null
+                    Reason = if ($previousRoutePresent) {
+                        '规则期望已变化，先移除本程序之前拥有的旧路由。'
+                    } else {
+                        '管理状态声明拥有旧路由，但真实 Windows 中已找不到该路由。'
+                    }
+                })
+            }
+
+            if ($conflicts.Count -gt 0 -and -not $canReplaceConflicts) {
+                $errors.Add('目标前缀已存在由其他网卡或网关负责的路由；程序不会覆盖。')
+                $diff.Add([pscustomobject]@{
+                    Resource = 'Route'
+                    Operation = 'Conflict'
+                    WillChange = $false
+                    Owned = $false
+                    Current = @($conflicts)
+                    Desired = $desired
+                    Reason = '存在不属于当前规则所有权范围的同目标路由。'
+                })
+            } elseif ($matchingRoutes.Count -gt 0) {
+                $diff.Add([pscustomobject]@{
+                    Resource = 'Route'
+                    Operation = 'Keep'
+                    WillChange = $false
+                    Owned = $previousRouteOwned
+                    Current = @($matchingRoutes)
+                    Desired = $desired
+                    Reason = '期望路由已经存在。'
+                })
+            } else {
+                if ($conflicts.Count -gt 0 -and $canReplaceConflicts) {
+                    $diff.Add([pscustomobject]@{
+                        Resource = 'Route'
+                        Operation = 'Remove'
+                        WillChange = $true
+                        Owned = $true
+                        Current = @($conflicts)
+                        Desired = $null
+                        Reason = '同目标冲突路由与本程序之前拥有的路由一致，可安全替换。'
+                    })
+                }
+                $diff.Add([pscustomobject]@{
+                    Resource = 'Route'
+                    Operation = 'Add'
+                    WillChange = $true
+                    Owned = $true
+                    Current = @()
+                    Desired = $desired
+                    Reason = '期望路由当前不存在。'
+                })
+            }
+        }
+
+        if ($previousProxyOwned -and $previousProxyToken -ne $proxyToken) {
+            if ($previousProxyPresent -and -not $otherRuleUsesPreviousProxy) {
+                $diff.Add([pscustomobject]@{
+                    Resource = 'ProxyBypass'
+                    Operation = 'Remove'
+                    WillChange = $true
+                    Owned = $true
+                    Current = $previousProxyToken
+                    Desired = ''
+                    Reason = '规则的代理绕过目标已变化，移除旧的已拥有 token。'
+                })
+            } elseif ($previousProxyPresent -and $otherRuleUsesPreviousProxy) {
+                $diff.Add([pscustomobject]@{
+                    Resource = 'ProxyBypass'
+                    Operation = 'KeepShared'
+                    WillChange = $false
+                    Owned = $true
+                    Current = $previousProxyToken
+                    Desired = $previousProxyToken
+                    Reason = '旧 token 仍被其他规则使用，不能移除。'
+                })
+            } elseif (-not $previousProxyPresent) {
+                $diff.Add([pscustomobject]@{
+                    Resource = 'ProxyBypass'
+                    Operation = 'Drift'
+                    WillChange = $false
+                    Owned = $true
+                    Current = ''
+                    Desired = ''
+                    Reason = '管理状态声明拥有旧代理绕过，但真实 ProxyOverride 中已不存在。'
+                })
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($proxyToken)) {
+            $diff.Add([pscustomobject]@{
+                Resource = 'ProxyBypass'
+                Operation = if ($proxyPresent) { 'Keep' } else { 'Add' }
+                WillChange = -not $proxyPresent
+                Owned = if ($proxyPresent) { $previousProxyOwned } else { $true }
+                Current = if ($proxyPresent) { $proxyToken } else { '' }
+                Desired = $proxyToken
+                Reason = if ($proxyPresent) { '代理绕过已经存在。' } else { '规则要求精确 IPv4 代理绕过。' }
+            })
+        }
+
+        $diff.Add([pscustomobject]@{
+            Resource = 'ManagerState'
+            Operation = if ($null -eq $state) { 'Add' } else { 'Update' }
+            WillChange = $true
+            Owned = $true
+            Current = $state
+            Desired = [pscustomobject]@{
+                Destination = $prefix
+                AdapterGuid = if ($null -eq $adapter) { '' } else { [string]$adapter.Guid }
+                InterfaceIndex = if ($null -eq $adapter) { 0 } else { [int]$adapter.Index }
+                Gateway = $gateway
+                ProxyToken = $proxyToken
+            }
+            Reason = '记录本程序实际应用后的资源所有权和期望状态。'
+        })
+    } else {
+        if ($previousRouteOwned) {
+            $diff.Add([pscustomobject]@{
+                Resource = 'Route'
+                Operation = if ($previousRoutePresent) { 'Remove' } else { 'Drift' }
+                WillChange = [bool]$previousRoutePresent
+                Owned = $true
+                Current = if ($previousRoutePresent) {
+                    [pscustomobject]@{
+                        Destination = $previousDestination
+                        InterfaceIndex = $previousIndex
+                        Gateway = $previousGateway
+                    }
+                } else { $null }
+                Desired = $null
+                Reason = if ($previousRoutePresent) {
+                    '仅撤销 manager-state 记录为本程序拥有的路由。'
+                } else {
+                    'manager-state 声明拥有路由，但真实 Windows 中已不存在。'
+                }
+            })
+        } else {
+            $diff.Add([pscustomobject]@{
+                Resource = 'Route'
+                Operation = 'KeepExternal'
+                WillChange = $false
+                Owned = $false
+                Current = @($exactRoutes)
+                Desired = @($exactRoutes)
+                Reason = '规则没有该路由的所有权，撤销时不会删除外部路由。'
+            })
+        }
+
+        if ($previousProxyOwned -and -not [string]::IsNullOrWhiteSpace($previousProxyToken)) {
+            $operation = if (-not $previousProxyPresent) {
+                'Drift'
+            } elseif ($otherRuleUsesPreviousProxy) {
+                'KeepShared'
+            } else {
+                'Remove'
+            }
+            $diff.Add([pscustomobject]@{
+                Resource = 'ProxyBypass'
+                Operation = $operation
+                WillChange = $operation -eq 'Remove'
+                Owned = $true
+                Current = if ($previousProxyPresent) { $previousProxyToken } else { '' }
+                Desired = if ($operation -eq 'KeepShared') { $previousProxyToken } else { '' }
+                Reason = switch ($operation) {
+                    'Remove' { '该代理绕过由本程序拥有且没有其他规则共享。' }
+                    'KeepShared' { '其他规则仍使用同一代理绕过，保留。' }
+                    default { 'manager-state 声明拥有代理绕过，但真实 ProxyOverride 中已不存在。' }
+                }
+            })
+        }
+
+        $diff.Add([pscustomobject]@{
+            Resource = 'ManagerState'
+            Operation = if ($null -eq $state) { 'NoOp' } else { 'Remove' }
+            WillChange = $null -ne $state
+            Owned = $true
+            Current = $state
+            Desired = $null
+            Reason = '撤销完成后清除该规则的 manager-state。'
+        })
+    }
+
     $fingerprintData = [ordered]@{
         Action = $Action
         Rule = [ordered]@{
@@ -981,13 +1271,31 @@ function Get-RulePlan {
     $fingerprint = Get-TextSha256 -Text ($fingerprintData | ConvertTo-Json -Depth 10 -Compress)
 
     $changes = [Collections.Generic.List[string]]::new()
-    if ($Action -eq 'Apply') {
-        $changes.Add("确保持久路由：$prefix -> $gateway")
-        if (-not [string]::IsNullOrWhiteSpace($proxyToken)) {
-            $changes.Add("确保系统代理绕过包含：$proxyToken")
+    foreach ($entry in @($diff | Where-Object WillChange)) {
+        switch ([string]$entry.Resource) {
+            'Route' {
+                if ($entry.Operation -eq 'Add') {
+                    $changes.Add("新增持久路由：$prefix -> $gateway")
+                } elseif ($entry.Operation -eq 'Remove') {
+                    $changes.Add('移除本程序拥有的旧/当前路由')
+                }
+            }
+            'ProxyBypass' {
+                if ($entry.Operation -eq 'Add') {
+                    $changes.Add("新增系统代理绕过：$($entry.Desired)")
+                } elseif ($entry.Operation -eq 'Remove') {
+                    $changes.Add("移除本程序拥有的代理绕过：$($entry.Current)")
+                }
+            }
+            'ManagerState' {
+                if ($entry.Operation -eq 'Remove') {
+                    $changes.Add('清除该规则的管理状态记录')
+                }
+            }
         }
-    } else {
-        $changes.Add("仅撤销本程序拥有的路由/代理项：$prefix")
+    }
+    if ($changes.Count -eq 0) {
+        $changes.Add('当前真实状态已经符合计划，不需要修改系统路由或代理。')
     }
 
     [pscustomobject]@{
@@ -1002,6 +1310,8 @@ function Get-RulePlan {
         ExpectedGateway = $gateway
         ExistingRoutes = @($exactRoutes)
         ProxyToken = $proxyToken
+        Diff = @($diff)
+        ChangeCount = @($diff | Where-Object WillChange).Count
         Changes = @($changes)
         Warnings = @($warnings)
         Errors = @($errors)
