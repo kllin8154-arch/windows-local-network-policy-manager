@@ -786,9 +786,117 @@ function Get-AddressExplanation {
         try { $selectedPrefix = ConvertTo-NormalizedPrefix -Value ([string]$r.DestinationPrefix) } catch {
             $selectedPrefix = [string]$r.DestinationPrefix
         }
+        $selectedPrefixLength = -1
+        if ($selectedPrefix -like '*/*') {
+            try { $selectedPrefixLength = [int]$selectedPrefix.Split('/')[1] } catch { }
+        }
         $selected = [pscustomobject]@{
             Destination = $selectedPrefix
-            PrefixLength = if ($selectedPrefix -match '/(d+)
+            PrefixLength = $selectedPrefixLength
+            InterfaceIndex = [int]$r.InterfaceIndex
+            InterfaceAlias = [string]$r.InterfaceAlias
+            Gateway = [string]$r.NextHop
+            RouteMetric = Get-RoutePropertyInt -Route $r -Name 'RouteMetric'
+            InterfaceMetric = Get-RoutePropertyInt -Route $r -Name 'InterfaceMetric'
+        }
+        $selected | Add-Member -NotePropertyName EffectiveMetric -NotePropertyValue (
+            [int]$selected.RouteMetric + [int]$selected.InterfaceMetric
+        )
+    } elseif ($sortedRoutes.Count -gt 0) {
+        $selected = $sortedRoutes[0]
+    }
+
+    $matchingRules = [Collections.Generic.List[object]]::new()
+    foreach ($rule in @($script:Rules)) {
+        $prefix = $null
+        try { $prefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination) } catch { continue }
+        if (-not (Test-IPv4InPrefix -Address $Address -Prefix $prefix)) { continue }
+
+        $range = Get-PrefixRange -Prefix $prefix
+        $adapter = $null
+        $gateway = ''
+        $resolutionError = ''
+        try {
+            $adapter = Resolve-Adapter -Rule $rule -Adapters $snapshot.Adapters
+            $gateway = Get-RuleGateway -Rule $rule -Adapter $adapter -Routes $snapshot.Routes
+        } catch {
+            $resolutionError = $_.Exception.Message
+        }
+
+        $state = Get-StateEntry -Id ([string]$rule.Id
+        )
+        $status = $null
+        try { $status = Get-RuleStatus -Rule $rule -Snapshot $snapshot } catch { }
+
+        $controlsSelected = $false
+        if ($null -ne $selected -and $null -ne $adapter -and -not [string]::IsNullOrWhiteSpace($gateway)) {
+            $controlsSelected =
+                [string]$selected.Destination -eq $prefix -and
+                [int]$selected.InterfaceIndex -eq [int]$adapter.Index -and
+                [string]$selected.Gateway -eq $gateway
+        }
+
+        $matchingRules.Add([pscustomobject]@{
+            Id = [string]$rule.Id
+            Name = [string]$rule.Name
+            Destination = $prefix
+            PrefixLength = [int]$range.PrefixLength
+            Enabled = [bool]$rule.Enabled
+            ExpectedAdapter = if ($null -eq $adapter) { [string]$rule.AdapterDescription } else { [string]$adapter.Name }
+            AdapterStatus = if ($null -eq $adapter) { 'Unavailable' } else { [string]$adapter.Status }
+            ExpectedGateway = $gateway
+            BypassProxy = [bool]$rule.BypassProxy
+            StatusCode = if ($null -eq $status) { '' } else { [string]$status.State }
+            Status = if ($null -eq $status) { '' } else { [string]$status.Text }
+            RouteOwned = $null -ne $state -and [bool]$state.RouteOwned
+            ProxyOwned = $null -ne $state -and [bool]$state.ProxyOwned
+            ControlsSelectedRoute = [bool]$controlsSelected
+            ResolutionError = $resolutionError
+        })
+    }
+
+    $sortedRules = @($matchingRules |
+        Sort-Object @{ Expression = 'PrefixLength'; Descending = $true },
+                    @{ Expression = 'Enabled'; Descending = $true },
+                    @{ Expression = 'Name'; Descending = $false })
+
+    $proxyExact = $Address -in @($snapshot.ProxyTokens)
+    $selectedRule = @($sortedRules | Where-Object ControlsSelectedRoute | Select-Object -First 1)
+    $mostSpecificRule = @($sortedRules | Where-Object Enabled | Select-Object -First 1)
+
+    $summary = if ($null -eq $selected) {
+        "Windows 当前没有为 $Address 选出可用 IPv4 路由。"
+    } else {
+        $routeSummary = "$Address → $($selected.Destination) → $($selected.InterfaceAlias)"
+        if (-not [string]::IsNullOrWhiteSpace([string]$selected.Gateway) -and [string]$selected.Gateway -ne '0.0.0.0') {
+            $routeSummary += " → $($selected.Gateway)"
+        }
+        if ($selectedRule.Count -gt 0) {
+            $routeSummary += "；由规则「$($selectedRule[0].Name)」与当前实际路由一致。"
+        } elseif ($mostSpecificRule.Count -gt 0) {
+            $routeSummary += "；存在匹配规则「$($mostSpecificRule[0].Name)」，但它没有控制当前最终路由。"
+        } else {
+            $routeSummary += '；没有管理器规则匹配该地址，当前由 Windows/其他软件路由决定。'
+        }
+        $routeSummary
+    }
+
+    [pscustomobject]@{
+        GeneratedAt = (Get-Date).ToString('o')
+        Address = $Address
+        Summary = $summary
+        SelectionRule = 'Windows 先比较最长前缀；前缀长度相同时再比较路由/接口 Metric。'
+        SelectedRoute = $selected
+        MatchingRules = @($sortedRules)
+        CandidateRoutes = @($sortedRoutes)
+        ProxyBypassExactPresent = [bool]$proxyExact
+        ProxyBypassExactToken = if ($proxyExact) { $Address } else { '' }
+        ManagedRuleControlsSelectedRoute = $selectedRule.Count -gt 0
+        SelectedManagedRuleId = if ($selectedRule.Count -gt 0) { [string]$selectedRule[0].Id } else { '' }
+        SelectedManagedRuleName = if ($selectedRule.Count -gt 0) { [string]$selectedRule[0].Name } else { '' }
+    }
+}
+
 function Get-PolicyAudit {
     $issues = [Collections.Generic.List[object]]::new()
     $snapshot = Get-SystemSnapshot
