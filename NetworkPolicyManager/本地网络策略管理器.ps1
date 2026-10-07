@@ -595,6 +595,260 @@ function Get-RuleById {
     $rule[0]
 }
 
+function ConvertTo-IPv4UInt64 {
+    param([Parameter(Mandatory)][string]$Address)
+    $ip = $null
+    if (-not [Net.IPAddress]::TryParse($Address, [ref]$ip) -or $ip.AddressFamily -ne 'InterNetwork') {
+        throw "无效的 IPv4 地址：$Address"
+    }
+    $b = $ip.GetAddressBytes()
+    ([uint64]$b[0] -shl 24) -bor ([uint64]$b[1] -shl 16) -bor ([uint64]$b[2] -shl 8) -bor [uint64]$b[3]
+}
+
+function Get-PrefixRange {
+    param([Parameter(Mandatory)][string]$Prefix)
+    $normalized = ConvertTo-NormalizedPrefix -Value $Prefix
+    $parts = $normalized.Split('/')
+    $start = ConvertTo-IPv4UInt64 -Address $parts[0]
+    $length = [int]$parts[1]
+    $size = if ($length -eq 0) { [uint64]4294967296 } else { [uint64]1 -shl (32 - $length) }
+    [pscustomobject]@{
+        Prefix = $normalized
+        PrefixLength = $length
+        Start = $start
+        End = $start + $size - 1
+    }
+}
+
+function Test-PrefixOverlap {
+    param(
+        [Parameter(Mandatory)][string]$Left,
+        [Parameter(Mandatory)][string]$Right
+    )
+    $a = Get-PrefixRange -Prefix $Left
+    $b = Get-PrefixRange -Prefix $Right
+    $a.Start -le $b.End -and $b.Start -le $a.End
+}
+
+function Get-PolicyAudit {
+    $issues = [Collections.Generic.List[object]]::new()
+    $snapshot = Get-SystemSnapshot
+
+    foreach ($rule in $script:Rules) {
+        $prefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
+        if ($prefix -eq '0.0.0.0/0') {
+            $issues.Add([pscustomobject]@{
+                Severity = 'Critical'
+                Code = 'DefaultRouteProtected'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Message = '禁止由本程序管理 0.0.0.0/0 默认路由。'
+            })
+        }
+
+        try {
+            $adapter = Resolve-Adapter -Rule $rule -Adapters $snapshot.Adapters
+            if ($adapter.Status -ne 'Up' -and [bool]$rule.Enabled) {
+                $issues.Add([pscustomobject]@{
+                    Severity = 'Warning'
+                    Code = 'AdapterDown'
+                    RuleId = [string]$rule.Id
+                    RuleName = [string]$rule.Name
+                    Message = "指定网卡当前未连接：$($adapter.Name)"
+                })
+            }
+            if ([string]$rule.GatewayMode -eq 'Auto') {
+                try { [void](Get-RuleGateway -Rule $rule -Adapter $adapter -Routes $snapshot.Routes) } catch {
+                    $issues.Add([pscustomobject]@{
+                        Severity = 'Error'
+                        Code = 'AutoGatewayUnavailable'
+                        RuleId = [string]$rule.Id
+                        RuleName = [string]$rule.Name
+                        Message = $_.Exception.Message
+                    })
+                }
+            }
+        } catch {
+            $issues.Add([pscustomobject]@{
+                Severity = 'Error'
+                Code = 'AdapterUnavailable'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Message = $_.Exception.Message
+            })
+        }
+
+        $state = Get-StateEntry -Id ([string]$rule.Id)
+        if ([bool]$rule.OwnExistingRoute -and ($null -eq $state -or -not [bool]$state.RouteOwned)) {
+            $issues.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'OwnershipClaimWithoutState'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Message = '规则声明接管已有路由，但当前管理状态中没有对应所有权记录。'
+            })
+        }
+    }
+
+    for ($i = 0; $i -lt $script:Rules.Count; $i++) {
+        $left = $script:Rules[$i]
+        if (-not [bool]$left.Enabled) { continue }
+        for ($j = $i + 1; $j -lt $script:Rules.Count; $j++) {
+            $right = $script:Rules[$j]
+            if (-not [bool]$right.Enabled) { continue }
+            if (-not (Test-PrefixOverlap -Left ([string]$left.Destination) -Right ([string]$right.Destination))) { continue }
+
+            $sameAdapter = (Get-NormalizedGuid -Value ([string]$left.AdapterGuid)) -eq
+                (Get-NormalizedGuid -Value ([string]$right.AdapterGuid))
+            $sameGateway = [string]$left.GatewayMode -eq [string]$right.GatewayMode -and
+                [string]$left.Gateway -eq [string]$right.Gateway
+            $severity = if ($sameAdapter -and $sameGateway) { 'Info' } else { 'Warning' }
+            $issues.Add([pscustomobject]@{
+                Severity = $severity
+                Code = 'OverlappingRules'
+                RuleId = [string]$left.Id
+                RuleName = [string]$left.Name
+                OtherRuleId = [string]$right.Id
+                OtherRuleName = [string]$right.Name
+                Message = "规则网段重叠：$($left.Destination) 与 $($right.Destination)。Windows 将优先使用更长前缀。"
+            })
+        }
+    }
+
+    $critical = @($issues | Where-Object Severity -eq 'Critical').Count
+    $errors = @($issues | Where-Object Severity -eq 'Error').Count
+    $warnings = @($issues | Where-Object Severity -eq 'Warning').Count
+    [pscustomobject]@{
+        GeneratedAt = (Get-Date).ToString('o')
+        RuleCount = $script:Rules.Count
+        StateCount = $script:State.Count
+        Healthy = ($critical + $errors) -eq 0
+        Summary = [pscustomobject]@{
+            Critical = $critical
+            Error = $errors
+            Warning = $warnings
+            Info = @($issues | Where-Object Severity -eq 'Info').Count
+        }
+        Issues = @($issues)
+    }
+}
+
+function Get-RulePlan {
+    param(
+        [Parameter(Mandatory)]$Rule,
+        [ValidateSet('Apply', 'Remove')][string]$Action = 'Apply'
+    )
+
+    $snapshot = Get-SystemSnapshot
+    $prefix = ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)
+    $adapter = $null
+    $gateway = ''
+    $errors = [Collections.Generic.List[string]]::new()
+    $warnings = [Collections.Generic.List[string]]::new()
+
+    try {
+        $adapter = Resolve-Adapter -Rule $Rule -Adapters $snapshot.Adapters
+        if ($adapter.Status -ne 'Up') {
+            $warnings.Add("指定网卡当前未连接：$($adapter.Name)")
+        }
+        $gateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $snapshot.Routes
+    } catch {
+        $errors.Add($_.Exception.Message)
+    }
+
+    $exactRoutes = @($snapshot.Routes | Where-Object DestinationPrefix -eq $prefix |
+        Sort-Object InterfaceIndex, NextHop, RouteMetric | ForEach-Object {
+            [pscustomobject]@{
+                InterfaceIndex = [int]$_.InterfaceIndex
+                InterfaceAlias = [string]$_.InterfaceAlias
+                Gateway = [string]$_.NextHop
+                Metric = [int]$_.RouteMetric
+            }
+        })
+
+    if ($Action -eq 'Apply' -and $null -ne $adapter -and -not [string]::IsNullOrWhiteSpace($gateway)) {
+        $conflicts = @($exactRoutes | Where-Object {
+            $_.InterfaceIndex -ne $adapter.Index -or $_.Gateway -ne $gateway
+        })
+        $previous = Get-StateEntry -Id ([string]$Rule.Id)
+        if ($conflicts.Count -gt 0) {
+            $canReplacePrevious = $null -ne $previous -and [bool]$previous.RouteOwned -and
+                @($conflicts | Where-Object Gateway -ne ([string]$previous.Gateway)).Count -eq 0
+            if (-not $canReplacePrevious) {
+                $errors.Add('目标前缀已存在由其他网卡或网关负责的路由；程序不会覆盖。')
+            }
+        }
+    }
+
+    $proxyToken = ''
+    if ([bool]$Rule.BypassProxy) {
+        try { $proxyToken = Get-ProxyTokenForRule -Rule $Rule } catch { $errors.Add($_.Exception.Message) }
+    }
+
+    $state = Get-StateEntry -Id ([string]$Rule.Id)
+    $fingerprintData = [ordered]@{
+        Action = $Action
+        Rule = [ordered]@{
+            Id = [string]$Rule.Id
+            Destination = $prefix
+            AdapterGuid = Get-NormalizedGuid -Value ([string]$Rule.AdapterGuid)
+            GatewayMode = [string]$Rule.GatewayMode
+            Gateway = [string]$Rule.Gateway
+            BypassProxy = [bool]$Rule.BypassProxy
+            Enabled = [bool]$Rule.Enabled
+        }
+        Adapter = if ($null -eq $adapter) { $null } else {
+            [ordered]@{
+                Guid = [string]$adapter.Guid
+                Index = [int]$adapter.Index
+                Status = [string]$adapter.Status
+            }
+        }
+        ResolvedGateway = $gateway
+        ExactRoutes = @($exactRoutes)
+        ProxyTokens = @($snapshot.ProxyTokens | Sort-Object)
+        State = if ($null -eq $state) { $null } else {
+            [ordered]@{
+                Destination = [string]$state.Destination
+                AdapterGuid = [string]$state.AdapterGuid
+                InterfaceIndex = [int]$state.InterfaceIndex
+                Gateway = [string]$state.Gateway
+                RouteOwned = [bool]$state.RouteOwned
+                ProxyToken = [string]$state.ProxyToken
+                ProxyOwned = [bool]$state.ProxyOwned
+            }
+        }
+    }
+    $fingerprint = Get-TextSha256 -Text ($fingerprintData | ConvertTo-Json -Depth 10 -Compress)
+
+    $changes = [Collections.Generic.List[string]]::new()
+    if ($Action -eq 'Apply') {
+        $changes.Add("确保持久路由：$prefix -> $gateway")
+        if (-not [string]::IsNullOrWhiteSpace($proxyToken)) {
+            $changes.Add("确保系统代理绕过包含：$proxyToken")
+        }
+    } else {
+        $changes.Add("仅撤销本程序拥有的路由/代理项：$prefix")
+    }
+
+    [pscustomobject]@{
+        GeneratedAt = (Get-Date).ToString('o')
+        Action = $Action
+        RuleId = [string]$Rule.Id
+        RuleName = [string]$Rule.Name
+        Destination = $prefix
+        Allowed = $errors.Count -eq 0
+        Fingerprint = $fingerprint
+        ExpectedAdapter = if ($null -eq $adapter) { '' } else { [string]$adapter.Name }
+        ExpectedGateway = $gateway
+        ExistingRoutes = @($exactRoutes)
+        ProxyToken = $proxyToken
+        Changes = @($changes)
+        Warnings = @($warnings)
+        Errors = @($errors)
+    }
+}
+
 function Get-RuleStatus {
     param(
         [Parameter(Mandatory)]$Rule,
@@ -869,6 +1123,9 @@ function Assert-Configuration {
         $ids[[string]$rule.Id] = $true
         if ([string]::IsNullOrWhiteSpace([string]$rule.Name)) { throw "规则 $($rule.Id) 缺少名称。" }
         $prefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
+        if ($prefix -eq '0.0.0.0/0') {
+            throw "规则「$($rule.Name)」试图管理默认路由 0.0.0.0/0；该目标受保护。"
+        }
         if ($destinations.ContainsKey($prefix)) { throw "目标重复：$prefix" }
         $destinations[$prefix] = $true
         if ([string]$rule.GatewayMode -notin @('Auto', 'Manual')) {
