@@ -1,3 +1,17 @@
+# ⚠ LEGACY MCP · 兼容旧配置
+
+此目录是早期单体 MCP，**不再是推荐入口**。
+
+新配置请使用：
+
+- `../mcp-user/`：🟢 USER MCP，实际网络策略使用；
+- `../mcp-dev/`：🛠 DEV MCP，开发/构建维护；
+- 总入口：`../MCP_INDEX.md`。
+
+旧 MCP 暴露的权限边界比新版宽，仅为已有客户端配置兼容而暂时保留。不要为新环境继续安装此目录。
+
+---
+
 # Windows Local Network Policy Manager MCP
 
 这个 MCP 服务把“本地网络策略管理器”的同一套 PowerShell 核心能力暴露给支持 MCP 的 AI 客户端。
