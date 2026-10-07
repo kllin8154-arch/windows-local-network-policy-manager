@@ -56,6 +56,10 @@ jobs:
           if ($null -eq $manager) { throw 'Manager script not found.' }
           & $manager.FullName -Command Audit
 
+      - name: Read-only validation
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\test.ps1"
+
       - name: Build portable package
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\package-portable.ps1"
