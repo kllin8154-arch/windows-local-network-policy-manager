@@ -20,10 +20,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 
 程序支持：
 
-- 启动时自动扫描当前 IPv4 网卡、默认路由、特定目标路由和 IPv4 代理绕过项；
+- 启动时自动扫描当前 IPv4 网卡、默认路由、特定目标路由和 IPv4 代理绕过项；识别 Ethernet / Wi-Fi / Virtual / Tunnel-VPN，但类型仅用于解释，Windows 实际路由始终是权威；
 - 首屏用 4 个状态卡展示“规则状态 / 已连接网卡 / 当前默认出口 / 待处理现有策略”；
 - 对未纳入管理的现有路由进行只读展示，并支持 Ctrl / Shift 多选后批量“导入”或“导入并接管”；
-- 自动识别窗口按“特定路由 / 网卡概览 / 代理绕过”三个视角展示，并可导出完整诊断快照；
+- 自动识别窗口增加“默认出口”视角，展示 Route Metric + Interface Metric 的有效优先级；特定路由同时显示 On-Link 虚拟网络，On-Link 只观察、不作为普通网关规则接管；
 - 主规则列表支持名称、分组、标签、目标地址、网卡、网关和状态搜索，可同时按分组与“已应用 / 未应用 / 异常 / 已禁用”过滤；
 - 右侧规则详情区集中展示期望出口、实际状态、代理绕过和所有权，并提供应用、诊断、修改、撤销、删除与复制详情；
 - 新增、修改、删除 IPv4 主机或 CIDR 网段规则，并可设置可选分组与标签；
@@ -35,7 +35,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 - 支持“选路查询”：输入任意单个 IPv4，按最长前缀和 Metric 展示 Windows 最终路由、全部候选路由、匹配规则和代理绕过；
 - GUI 应用/撤销前先生成 Current → Planned Diff，并使用同一 Plan Fingerprint 执行；批量应用任一规则失效后停止后续操作；
 - 支持规则备份、安全快照和安全恢复；Apply/Remove 前自动快照，快照带 SHA256；恢复规则不会立即修改 Windows 网络；
-- 支持规则重叠审计、默认路由保护、单写锁和 Plan Fingerprint，避免复杂规则或并发操作导致误改；
+- 支持规则重叠审计、多个默认出口审计、默认路由保护、单写锁和 Plan Fingerprint，避免复杂规则或并发操作导致误改；
+- 安全中心支持 manager-state 状态漂移检测和两阶段修复计划；孤儿状态和外部匹配不会自动清理/接管；
 - 支持 15 秒可选自动刷新、日志折叠和 F5 / Ctrl+F / Ctrl+N / Ctrl+D 快捷键；
 - 只管理精确路由，不修改默认路由、IP、DHCP 或接口跃点。
 
@@ -55,6 +56,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 ```powershell
 .\本地网络策略管理器.ps1 -Command Discover
 .\本地网络策略管理器.ps1 -Command Audit
+.\本地网络策略管理器.ps1 -Command Drift
+.\本地网络策略管理器.ps1 -Command PlanRepair -RuleId <id>
 .\本地网络策略管理器.ps1 -Command ExplainAddress -Address 172.16.11.205
 .\本地网络策略管理器.ps1 -Command ListRules
 .\本地网络策略管理器.ps1 -Command ListGroups
@@ -74,7 +77,7 @@ MCP 已拆分：
 - `mcp-dev/`：开发、自检、构建和打包；
 - `mcp/`：旧版兼容入口。
 
-详见 `MCP_INDEX.md` 和 `../docs/SAFETY_BACKUP_RECOVERY.md`。
+详见 `MCP_INDEX.md`、`../docs/SAFETY_BACKUP_RECOVERY.md` 和 `../docs/MULTI_NETWORK_MODEL.md`。
 
 ## 界面视觉规范
 
