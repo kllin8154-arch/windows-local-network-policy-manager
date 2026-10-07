@@ -21,6 +21,18 @@ function Invoke-ManagerReadOnly {
     $output
 }
 
+function ConvertFrom-JsonArrayText {
+    param([Parameter(Mandatory)][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    $parsed = $Text | ConvertFrom-Json
+    if ($parsed -is [Array]) {
+        foreach ($item in $parsed) { $item }
+    } elseif ($null -ne $parsed) {
+        $parsed
+    }
+}
+
 Write-Host '1/7 PowerShell / 配置自检...' -ForegroundColor Cyan
 $selfTest = Invoke-ManagerReadOnly -Arguments @('-SelfTest')
 Write-Host ($selfTest -join [Environment]::NewLine) -ForegroundColor Green
@@ -66,7 +78,7 @@ Write-Host (
 
 Write-Host '5/7 变更计划 Diff...' -ForegroundColor Cyan
 $rulesText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ListRules')) -join [Environment]::NewLine
-$rules = @($rulesText | ConvertFrom-Json)
+$rules = @(ConvertFrom-JsonArrayText -Text $rulesText)
 if ($rules.Count -gt 0) {
     $planText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'PlanRule', '-RuleId', [string]$rules[0].Id, '-Action', 'Apply')) -join [Environment]::NewLine
     $plan = $planText | ConvertFrom-Json
