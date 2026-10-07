@@ -36,8 +36,7 @@ jobs:
             Write-Host "PARSE_OK $($file.FullName)"
           }
 
-      - name: Resolve manager script
-        id: manager
+      - name: Manager self-test
         shell: powershell
         run: |
           $known = @('build.ps1', 'test.ps1', 'package-portable.ps1')
@@ -46,20 +45,18 @@ jobs:
             Sort-Object Length -Descending |
             Select-Object -First 1
           if ($null -eq $manager) { throw 'Manager script not found.' }
-          "path=$($manager.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "MANAGER $($manager.FullName)"
-
-      - name: Manager self-test
-        shell: powershell
-        run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${{ steps.manager.outputs.path }}" -SelfTest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $manager.FullName -SelfTest
 
       - name: Policy audit
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${{ steps.manager.outputs.path }}" -Command Audit
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $known = @('build.ps1', 'test.ps1', 'package-portable.ps1')
+          $manager = Get-ChildItem '.\NetworkPolicyManager' -File -Filter '*.ps1' |
+            Where-Object { $_.Name -notin $known } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if ($null -eq $manager) { throw 'Manager script not found.' }
+          & $manager.FullName -Command Audit
 
       - name: Build portable package
         shell: powershell
