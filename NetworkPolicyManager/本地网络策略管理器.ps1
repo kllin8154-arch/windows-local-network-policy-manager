@@ -1402,6 +1402,48 @@ function Get-PolicyAudit {
     $issues = [Collections.Generic.List[object]]::new()
     $snapshot = Get-SystemSnapshot
 
+    $activeDefaultRoutes = @($snapshot.Routes | Where-Object {
+        $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0'
+    } | ForEach-Object {
+        $route = $_
+        $adapterMatches = @(Get-AdapterByIndex -InterfaceIndex ([int]$route.InterfaceIndex) -Adapters $snapshot.Adapters)
+        $adapter = if ($adapterMatches.Count -gt 0) { $adapterMatches[0] } else { $null }
+        if ($null -ne $adapter -and [string]$adapter.Status -eq 'Up') {
+            [pscustomobject]@{
+                InterfaceIndex = [int]$route.InterfaceIndex
+                InterfaceAlias = [string]$route.InterfaceAlias
+                AdapterKind = [string]$adapter.Kind
+                Gateway = [string]$route.NextHop
+                EffectiveMetric = Get-RouteEffectiveMetric -Route $route -Adapters $snapshot.Adapters
+            }
+        }
+    } | Sort-Object EffectiveMetric, InterfaceIndex)
+
+    if ($activeDefaultRoutes.Count -gt 1) {
+        $issues.Add([pscustomobject]@{
+            Severity = 'Info'
+            Code = 'MultipleDefaultPaths'
+            RuleId = ''
+            RuleName = '[系统网络]'
+            Message = "当前有 $($activeDefaultRoutes.Count) 个已连接默认出口。网线、Wi-Fi、虚拟/VPN 可并存；实际选路以最长前缀与有效 Metric 为准。"
+        })
+
+        $bestMetric = [int]$activeDefaultRoutes[0].EffectiveMetric
+        $bestTies = @($activeDefaultRoutes | Where-Object EffectiveMetric -eq $bestMetric)
+        if ($bestTies.Count -gt 1) {
+            $detail = ($bestTies | ForEach-Object {
+                "$($_.InterfaceAlias)[$($_.AdapterKind)]/$($_.Gateway)"
+            }) -join '；'
+            $issues.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'DefaultPathMetricTie'
+                RuleId = ''
+                RuleName = '[系统网络]'
+                Message = "多个默认出口具有相同的最低有效 Metric=$bestMetric：$detail。系统仍有其他选路细节，切换网络时建议重新 Discover/ExplainAddress。"
+            })
+        }
+    }
+
     foreach ($rule in $script:Rules) {
         $prefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
         if ($prefix -eq '0.0.0.0/0') {
@@ -1423,6 +1465,16 @@ function Get-PolicyAudit {
                     RuleId = [string]$rule.Id
                     RuleName = [string]$rule.Name
                     Message = "指定网卡当前未连接：$($adapter.Name)"
+                })
+            }
+            if ([string]$adapter.Kind -in @('Virtual','Tunnel/VPN')) {
+                $provider = if ([string]::IsNullOrWhiteSpace([string]$adapter.VirtualProvider)) { '' } else { " / $($adapter.VirtualProvider)" }
+                $issues.Add([pscustomobject]@{
+                    Severity = 'Info'
+                    Code = 'VirtualOrTunnelAdapter'
+                    RuleId = [string]$rule.Id
+                    RuleName = [string]$rule.Name
+                    Message = "规则绑定到 $($adapter.Kind)$provider：$($adapter.Name)。类型仅用于说明，执行仍以 GUID、真实路由和网关为准。"
                 })
             }
             if ([string]$rule.GatewayMode -eq 'Auto') {
