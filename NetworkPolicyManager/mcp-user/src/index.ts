@@ -66,6 +66,17 @@ server.registerTool("network_policy_audit", {
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, async () => result(await runManager("Audit")));
 
+server.registerTool("network_policy_explain_address", {
+  title: "解释 IPv4 最终选路",
+  description: "只读。输入一个 IPv4，解释 Windows 当前最终选择的路由、最长前缀候选、匹配的管理器规则以及精确代理绕过状态。",
+  inputSchema: z.object({
+    address: z.string().min(7).max(15).describe("单个 IPv4 地址，例如 172.16.11.205"),
+  }),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async ({ address }) =>
+  result(await runManager("ExplainAddress", ["-Address", address])));
+
+
 server.registerTool("network_policy_list_rules", {
   title: "读取已配置规则",
   description: "只读。返回管理器保存的所有规则定义。",
