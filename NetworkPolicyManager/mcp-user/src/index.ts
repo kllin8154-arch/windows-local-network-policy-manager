@@ -183,5 +183,5 @@ server.registerTool("network_policy_restore_rules", {
 }, async ({ backupId }) =>
   result(await runManager("RestoreRules", ["-BackupId", backupId, "-Approved"])));
 
-void serveStdio(server);
+void serveStdio(() => server);
 console.error("USER MCP: Windows Local Network Policy Manager running on stdio");
