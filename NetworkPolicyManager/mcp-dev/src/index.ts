@@ -137,5 +137,5 @@ server.registerTool("dev_package_portable", {
   "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", packageScript, "-Version", version,
 ])));
 
-void serveStdio(server);
+void serveStdio(() => server);
 console.error("DEV MCP: Windows Local Network Policy Manager development tools running on stdio");
