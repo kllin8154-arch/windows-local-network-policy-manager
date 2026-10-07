@@ -9,6 +9,8 @@ Thumbs.db
 *.pdb
 /dist/
 /NetworkPolicyManager/mcp/node_modules/
+/NetworkPolicyManager/mcp-user/node_modules/
+/NetworkPolicyManager/mcp-dev/node_modules/
 
 # Local runtime state and logs
 *.log
@@ -20,3 +22,6 @@ NetworkPolicyManager/ui-smoke-test.png
 
 # Device-specific snapshots and rollback backups
 *变更前备份*.json
+
+# Safety snapshots are local machine recovery material
+NetworkPolicyManager/backups/
