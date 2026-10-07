@@ -31,6 +31,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 - 使用网卡当前默认网关，或手动指定离线网络网关；
 - 为浏览器访问的精确 IPv4 地址增加/移除系统代理绕过；
 - 支持增强诊断：检查期望网卡、实际选路、下一跳、代理绕过和管理状态；
+- 支持“选路查询”：输入任意单个 IPv4，按最长前缀和 Metric 展示 Windows 最终路由、全部候选路由、匹配规则和代理绕过；
+- GUI 应用/撤销前先生成 Current → Planned Diff，并使用同一 Plan Fingerprint 执行；批量应用任一规则失效后停止后续操作；
 - 支持规则备份、安全快照和安全恢复；Apply/Remove 前自动快照，快照带 SHA256；恢复规则不会立即修改 Windows 网络；
 - 支持规则重叠审计、默认路由保护、单写锁和 Plan Fingerprint，避免复杂规则或并发操作导致误改；
 - 支持 15 秒可选自动刷新、日志折叠和 F5 / Ctrl+F / Ctrl+N / Ctrl+D 快捷键；
@@ -52,6 +54,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 ```powershell
 .\本地网络策略管理器.ps1 -Command Discover
 .\本地网络策略管理器.ps1 -Command Audit
+.\本地网络策略管理器.ps1 -Command ExplainAddress -Address 172.16.11.205
 .\本地网络策略管理器.ps1 -Command ListRules
 .\本地网络策略管理器.ps1 -Command TestRule -RuleId <id>
 .\本地网络策略管理器.ps1 -Command PlanRule -RuleId <id> -Action Apply
@@ -80,7 +83,8 @@ MCP 已拆分：
 - `F5`：刷新当前规则和网络状态；
 - `Ctrl+F`：定位到规则搜索框；
 - `Ctrl+N`：新增规则；
-- `Ctrl+D`：重新识别当前 Windows 网络策略。
+- `Ctrl+D`：重新识别当前 Windows 网络策略；
+- `Ctrl+Q`：打开只读“选路查询”。
 
 自动识别在启动时执行，但不会强制弹窗或自动接管已有系统路由；主界面的“待处理现有策略”卡片会提示数量，点击后再由用户决定是否导入或接管。
 
