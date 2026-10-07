@@ -2108,6 +2108,236 @@ function Show-DiscoveryDialog {
     [void]$dialog.ShowDialog($form)
 }
 
+function Show-AddressExplainDialog {
+    param([string]$InitialAddress = '')
+
+    $dialog = [Windows.Forms.Form]::new()
+    $dialog.Text = '选路解释器'
+    $dialog.ClientSize = [Drawing.Size]::new(1080, 700)
+    $dialog.MinimumSize = [Drawing.Size]::new(900, 600)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+    $dialog.BackColor = $script:Theme.Background
+    $dialog.ForeColor = $script:Theme.WarmText
+    $dialog.KeyPreview = $true
+
+    $header = [Windows.Forms.Panel]::new()
+    $header.Dock = 'Top'
+    $header.Height = 104
+    $header.Padding = [Windows.Forms.Padding]::new(18, 12, 18, 10)
+    $header.BackColor = $script:Theme.Background
+    $dialog.Controls.Add($header)
+
+    $title = [Windows.Forms.Label]::new()
+    $title.Text = '这个 IP 最终会怎么走？'
+    $title.Font = [Drawing.Font]::new('Microsoft YaHei UI', 15, [Drawing.FontStyle]::Bold)
+    $title.ForeColor = $script:Theme.Accent
+    $title.AutoSize = $true
+    $title.Location = [Drawing.Point]::new(18, 10)
+    $header.Controls.Add($title)
+
+    $sub = [Windows.Forms.Label]::new()
+    $sub.Text = '只读查询。按 Windows 最长前缀优先规则解释最终路由，并同时展示匹配的管理器规则和代理绕过。'
+    $sub.ForeColor = $script:Theme.MutedText
+    $sub.AutoSize = $true
+    $sub.Location = [Drawing.Point]::new(20, 43)
+    $header.Controls.Add($sub)
+
+    $addressBox = [Windows.Forms.TextBox]::new()
+    $addressBox.Text = $InitialAddress
+    $addressBox.Location = [Drawing.Point]::new(20, 69)
+    $addressBox.Size = [Drawing.Size]::new(260, 26)
+    Set-UiInputTheme -Control $addressBox
+    $header.Controls.Add($addressBox)
+
+    $queryButton = New-UiButton -Text '解释选路' -Width 96 -Variant 'Primary'
+    $queryButton.Location = [Drawing.Point]::new(292, 64)
+    $header.Controls.Add($queryButton)
+
+    $copyButton = New-UiButton -Text '复制结论' -Width 96
+    $copyButton.Location = [Drawing.Point]::new(396, 64)
+    $header.Controls.Add($copyButton)
+
+    $tabs = [Windows.Forms.TabControl]::new()
+    $tabs.Dock = 'Fill'
+    $dialog.Controls.Add($tabs)
+
+    $overviewTab = [Windows.Forms.TabPage]::new()
+    $overviewTab.Text = '结论'
+    $overviewTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($overviewTab)
+
+    $routeTab = [Windows.Forms.TabPage]::new()
+    $routeTab.Text = '候选路由'
+    $routeTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($routeTab)
+
+    $ruleTab = [Windows.Forms.TabPage]::new()
+    $ruleTab.Text = '匹配规则'
+    $ruleTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($ruleTab)
+
+    $overviewBox = [Windows.Forms.RichTextBox]::new()
+    $overviewBox.Dock = 'Fill'
+    $overviewBox.ReadOnly = $true
+    $overviewBox.BorderStyle = 'None'
+    $overviewBox.BackColor = $script:Theme.Surface
+    $overviewBox.ForeColor = $script:Theme.WarmText
+    $overviewBox.Font = [Drawing.Font]::new('Microsoft YaHei UI', 10)
+    $overviewBox.Text = '输入单个 IPv4 地址后点击“解释选路”。'
+    $overviewTab.Controls.Add($overviewBox)
+
+    $routeGrid = [Windows.Forms.DataGridView]::new()
+    $routeGrid.Dock = 'Fill'
+    $routeGrid.ReadOnly = $true
+    $routeGrid.AllowUserToAddRows = $false
+    $routeGrid.AllowUserToDeleteRows = $false
+    $routeGrid.RowHeadersVisible = $false
+    $routeGrid.SelectionMode = 'FullRowSelect'
+    $routeGrid.MultiSelect = $false
+    $routeGrid.AutoGenerateColumns = $false
+    Initialize-GridTheme -Grid $routeGrid
+    $routeTab.Controls.Add($routeGrid)
+
+    foreach ($spec in @(
+        @('Prefix','目标前缀',170),
+        @('Length','前缀长度',80),
+        @('Adapter','网卡',220),
+        @('Gateway','下一跳',150),
+        @('Metric','Metric',90),
+        @('Selected','最终',75)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'Adapter') { $column.AutoSizeMode = 'Fill' }
+        [void]$routeGrid.Columns.Add($column)
+    }
+
+    $ruleGrid = [Windows.Forms.DataGridView]::new()
+    $ruleGrid.Dock = 'Fill'
+    $ruleGrid.ReadOnly = $true
+    $ruleGrid.AllowUserToAddRows = $false
+    $ruleGrid.AllowUserToDeleteRows = $false
+    $ruleGrid.RowHeadersVisible = $false
+    $ruleGrid.SelectionMode = 'FullRowSelect'
+    $ruleGrid.MultiSelect = $false
+    $ruleGrid.AutoGenerateColumns = $false
+    Initialize-GridTheme -Grid $ruleGrid
+    $ruleTab.Controls.Add($ruleGrid)
+
+    foreach ($spec in @(
+        @('Rule','规则',220),
+        @('Prefix','目标前缀',160),
+        @('Adapter','期望网卡',220),
+        @('Gateway','期望网关',135),
+        @('Status','状态',150),
+        @('Controls','控制最终路由',105)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'Rule') { $column.AutoSizeMode = 'Fill' }
+        [void]$ruleGrid.Columns.Add($column)
+    }
+
+    $script:lastAddressExplanationText = ''
+
+    $runQuery = {
+        $address = $addressBox.Text.Trim()
+        try {
+            $result = Get-AddressExplanation -Address $address
+            $routeGrid.Rows.Clear()
+            $ruleGrid.Rows.Clear()
+
+            foreach ($route in @($result.CandidateRoutes)) {
+                $isSelected = $false
+                if ($null -ne $result.SelectedRoute) {
+                    $isSelected =
+                        [string]$route.Destination -eq [string]$result.SelectedRoute.Destination -and
+                        [int]$route.InterfaceIndex -eq [int]$result.SelectedRoute.InterfaceIndex -and
+                        [string]$route.Gateway -eq [string]$result.SelectedRoute.Gateway
+                }
+                [void]$routeGrid.Rows.Add(
+                    [string]$route.Destination,
+                    [string]$route.PrefixLength,
+                    [string]$route.InterfaceAlias,
+                    [string]$route.Gateway,
+                    [string]$route.EffectiveMetric,
+                    $(if ($isSelected) { '是' } else { '' })
+                )
+            }
+
+            foreach ($rule in @($result.MatchingRules)) {
+                [void]$ruleGrid.Rows.Add(
+                    [string]$rule.Name,
+                    [string]$rule.Destination,
+                    [string]$rule.ExpectedAdapter,
+                    [string]$rule.ExpectedGateway,
+                    $(if ([string]::IsNullOrWhiteSpace([string]$rule.ResolutionError)) { [string]$rule.Status } else { [string]$rule.ResolutionError }),
+                    $(if ($rule.ControlsSelectedRoute) { '是' } else { '' })
+                )
+            }
+
+            $lines = [Collections.Generic.List[string]]::new()
+            $lines.Add($result.Summary)
+            $lines.Add('')
+            $lines.Add('选路原则')
+            $lines.Add('  ' + [string]$result.SelectionRule)
+            $lines.Add('')
+
+            if ($null -eq $result.SelectedRoute) {
+                $lines.Add('最终路由：无')
+            } else {
+                $lines.Add('最终路由')
+                $lines.Add("  前缀：$($result.SelectedRoute.Destination)")
+                $lines.Add("  网卡：$($result.SelectedRoute.InterfaceAlias)  [Index $($result.SelectedRoute.InterfaceIndex)]")
+                $lines.Add("  下一跳：$($result.SelectedRoute.Gateway)")
+                $lines.Add("  Effective Metric：$($result.SelectedRoute.EffectiveMetric)")
+            }
+            $lines.Add('')
+            $lines.Add("匹配的管理器规则：$(@($result.MatchingRules).Count) 条")
+            $lines.Add("匹配的 Windows 路由：$(@($result.CandidateRoutes).Count) 条")
+            $lines.Add("精确代理绕过：$(if ($result.ProxyBypassExactPresent) { '存在' } else { '不存在' })")
+            $lines.Add("当前最终路由由管理器规则控制：$(if ($result.ManagedRuleControlsSelectedRoute) { '是' } else { '否' })")
+            if ($result.ManagedRuleControlsSelectedRoute) {
+                $lines.Add("控制规则：$($result.SelectedManagedRuleName)")
+            }
+
+            $script:lastAddressExplanationText = $lines -join [Environment]::NewLine
+            $overviewBox.Text = $script:lastAddressExplanationText
+            Write-AppLog -Message "选路解释：$address | $($result.Summary)"
+        } catch {
+            $script:lastAddressExplanationText = ''
+            $overviewBox.Text = $_.Exception.Message
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, '选路查询失败', 'OK', 'Error') | Out-Null
+        }
+    }
+
+    $queryButton.Add_Click({ & $runQuery })
+    $copyButton.Add_Click({
+        if (-not [string]::IsNullOrWhiteSpace($script:lastAddressExplanationText)) {
+            [Windows.Forms.Clipboard]::SetText($script:lastAddressExplanationText)
+        }
+    })
+    $addressBox.Add_KeyDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.KeyCode -eq 'Enter') {
+            & $runQuery
+            $eventArgs.SuppressKeyPress = $true
+        }
+    })
+    $dialog.Add_Shown({
+        $addressBox.Focus()
+        $addressBox.SelectAll()
+        if (-not [string]::IsNullOrWhiteSpace($addressBox.Text)) { & $runQuery }
+    })
+
+    [void]$dialog.ShowDialog($form)
+}
+
 function Show-SafetyCenter {
     $dialog = [Windows.Forms.Form]::new()
     $dialog.Text = '安全中心'
@@ -2416,11 +2646,12 @@ $discoverButton = New-UiButton -Text '识别当前策略' -Width 118 -Variant 'A
 $addButton = New-UiButton -Text '新增规则' -Width 92
 $applyAllButton = New-UiButton -Text '应用全部' -Width 92 -Variant 'Primary'
 $refreshButton = New-UiButton -Text '刷新' -Width 78
+$explainButton = New-UiButton -Text '选路查询' -Width 92 -Variant 'Accent'
 $backupButton = New-UiButton -Text '备份规则' -Width 92
 $restoreButton = New-UiButton -Text '导入备份' -Width 92
 $safetyButton = New-UiButton -Text '安全中心' -Width 92 -Variant 'Accent'
 
-@($discoverButton, $addButton, $applyAllButton, $refreshButton, $safetyButton, $backupButton, $restoreButton) |
+@($discoverButton, $addButton, $applyAllButton, $refreshButton, $explainButton, $safetyButton, $backupButton, $restoreButton) |
     ForEach-Object { [void]$toolbar.Controls.Add($_) }
 
 $searchLabel = [Windows.Forms.Label]::new()
@@ -3043,6 +3274,17 @@ $grid.Add_SelectionChanged({ Update-RuleDetail })
 $searchBox.Add_TextChanged({ Render-RuleGrid })
 $filterBox.Add_SelectedIndexChanged({ Render-RuleGrid })
 
+$explainButton.Add_Click({
+    $initial = ''
+    $rule = Get-SelectedRule
+    if ($null -ne $rule) {
+        try {
+            $prefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
+            $initial = [string]$prefix.Split('/')[0]
+        } catch { }
+    }
+    Show-AddressExplainDialog -InitialAddress $initial
+})
 $safetyButton.Add_Click({ Show-SafetyCenter })
 
 $backupButton.Add_Click({
@@ -3223,6 +3465,9 @@ $form.Add_KeyDown({
         $eventArgs.Handled = $true
     } elseif ($eventArgs.Control -and $eventArgs.KeyCode -eq 'D') {
         Show-DiscoveryDialog
+        $eventArgs.Handled = $true
+    } elseif ($eventArgs.Control -and $eventArgs.KeyCode -eq 'Q') {
+        Show-AddressExplainDialog
         $eventArgs.Handled = $true
     }
 })
