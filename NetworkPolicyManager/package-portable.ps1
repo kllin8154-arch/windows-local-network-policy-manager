@@ -25,6 +25,7 @@ foreach ($required in @($launcher, $manager, $rules, $readme)) {
 try {
     Copy-Item -LiteralPath $launcher -Destination $stage
     Copy-Item -LiteralPath $manager -Destination (Join-Path $stage 'NetworkPolicyManager')
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Core') -Destination (Join-Path $stage 'NetworkPolicyManager\Core') -Recurse
     Copy-Item -LiteralPath $rules -Destination (Join-Path $stage 'NetworkPolicyManager\network-rules.default.json')
     Copy-Item -LiteralPath $readme -Destination $stage
 
