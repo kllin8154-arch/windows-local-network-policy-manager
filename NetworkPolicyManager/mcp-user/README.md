@@ -31,7 +31,9 @@ npm run start
 | network_policy_discover | 只读 | 当前网卡、路由、代理、管理状态 |
 | network_policy_audit | 只读 | 重叠、网卡、网关、所有权风险 |
 | network_policy_explain_address | 只读 | 输入 IPv4，解释最终 Windows 选路、候选路由、匹配规则与代理绕过 |
-| network_policy_list_rules | 只读 | 规则定义 |
+| network_policy_list_rules | 只读 | 规则定义（含可选 Group / Tags） |
+| network_policy_list_groups | 只读 | 分组、规则数、启用数和标签汇总 |
+| network_policy_plan_group | 只读 | 整组逐条生成 Plan/Fingerprint；不直接执行 |
 | network_policy_plan | 只读 | Apply / Remove 的 Current → Planned Diff、系统变更数与 Fingerprint |
 | network_policy_test_rule | 只读 | 规则实际选路诊断 |
 | network_policy_create_backup | 低 | 创建安全快照，不改网络 |
@@ -45,7 +47,7 @@ npm run start
 
 ### 不允许 AI 接管已有路由
 
-network_policy_save_rule 固定 OwnExistingRoute=false、OwnExistingProxy=false。
+network_policy_save_rule 支持可选 group / tags，同时固定 OwnExistingRoute=false、OwnExistingProxy=false。
 
 已有外部路由如需接管，只能在 GUI 自动识别窗口中由用户人工确认。
 
@@ -88,3 +90,17 @@ network_policy_restore_rules 只恢复规则配置；恢复后会清除接管标
 - 批量修改前先 CreateBackup。
 
 完整安全模型：../../docs/SAFETY_BACKUP_RECOVERY.md
+
+
+## 分组操作原则
+
+分组只是组织和批量计划维度，不会取得任何额外路由所有权。
+
+推荐流程：
+
+1. network_policy_list_groups
+2. network_policy_plan_group
+3. 展示整组被阻止项、Warnings 与预计系统变更
+4. 用户确认后，仍使用现有 network_policy_apply_rule 逐条提交每条规则自己的 Fingerprint
+
+USER MCP 刻意不提供一键 apply_group，避免一个高权限调用跨越多条规则的独立状态校验。
