@@ -3,7 +3,7 @@ name: Windows validation
 on:
   push:
     branches:
-      - feature/auto-discovery-mcp
+      - main
   pull_request:
     branches:
       - main
@@ -21,11 +21,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $files = @(
-            './NetworkPolicyManager/package-portable.ps1',
-            '.\\NetworkPolicyManager\\本地网络策略管理器.ps1',
-            '.\\NetworkPolicyManager\\build.ps1',
-            '.\\NetworkPolicyManager\\test.ps1',
-            '.\\NetworkPolicyManager\\mcp\\setup.ps1'
+            '.\NetworkPolicyManager\package-portable.ps1',
+            '.\NetworkPolicyManager\本地网络策略管理器.ps1',
+            '.\NetworkPolicyManager\build.ps1',
+            '.\NetworkPolicyManager\test.ps1',
+            '.\NetworkPolicyManager\mcp-user\setup.ps1',
+            '.\NetworkPolicyManager\mcp-dev\setup.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null
@@ -44,11 +45,15 @@ jobs:
 
       - name: Manager self-test
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\NetworkPolicyManager\\本地网络策略管理器.ps1" -SelfTest
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\本地网络策略管理器.ps1" -SelfTest
+
+      - name: Policy audit
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\本地网络策略管理器.ps1" -Command Audit
 
       - name: Build portable package
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "./NetworkPolicyManager/package-portable.ps1"
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\package-portable.ps1"
 
       - name: Upload portable package
         uses: actions/upload-artifact@v4
@@ -62,12 +67,22 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install MCP dependencies
-        working-directory: NetworkPolicyManager/mcp
+      - name: Install User MCP
+        working-directory: NetworkPolicyManager/mcp-user
         shell: powershell
         run: npm ci
 
-      - name: Typecheck MCP
-        working-directory: NetworkPolicyManager/mcp
+      - name: Typecheck User MCP
+        working-directory: NetworkPolicyManager/mcp-user
+        shell: powershell
+        run: npm run check
+
+      - name: Install Dev MCP
+        working-directory: NetworkPolicyManager/mcp-dev
+        shell: powershell
+        run: npm ci
+
+      - name: Typecheck Dev MCP
+        working-directory: NetworkPolicyManager/mcp-dev
         shell: powershell
         run: npm run check
