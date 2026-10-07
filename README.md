@@ -3,15 +3,21 @@
 ## 推荐入口：可视化管理器
 
 现在优先使用桌面的 **“本地网络策略管理器”** 快捷方式，或双击本目录的
-`本地网络策略管理器.exe`。程序可新增、修改、删除、应用、撤销和测试 IPv4/CIDR
+`本地网络策略管理器.exe`。程序启动时会自动识别当前 Windows 网络策略，包括网卡、默认路由、特定目标路由和可处理的 IPv4 代理绕过项；用户确认后再决定是否导入或接管已有策略。程序也可新增、修改、删除、应用、撤销和测试 IPv4/CIDR
 分流规则，并按网卡硬件 GUID 自动适应会变化的接口编号。
 
 从 GitHub 克隆源码后，先在 PowerShell 中运行
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\build.ps1"`，
 即可在根目录生成 `本地网络策略管理器.exe`。编译产物和本机运行状态不纳入版本控制。
 
+需要免安装包时，在仓库根目录运行
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\package-portable.ps1"`。
+生成的 ZIP 位于 `dist`，解压使用与升级说明见 `NetworkPolicyManager/README-免安装.md`。
+
 管理器只维护精确路由和选定的系统代理绕过，不修改默认路由、IP、DHCP 或网卡跃点。
 详细说明见 `NetworkPolicyManager/README.md`。
+
+AI / Agent 调用入口位于 `NetworkPolicyManager/mcp`，通过 MCP 暴露自动发现、规则读取/保存、测试、应用和撤销能力。涉及实际修改 Windows 路由或代理时仍要求明确批准及管理员权限。
 
 > 开始使用管理器后，不要再交叉运行旧脚本的 `Apply/Rollback`；旧脚本继续保留作历史备份。
 

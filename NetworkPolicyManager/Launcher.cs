@@ -24,6 +24,7 @@ internal static class Program
             Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File \"" + scriptPath + "\"",
             WorkingDirectory = baseDirectory,
             UseShellExecute = false,
+            RedirectStandardError = true,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden
         };
@@ -32,10 +33,20 @@ internal static class Program
         {
             using (Process process = Process.Start(startInfo))
             {
+                string errorOutput = process.StandardError.ReadToEnd().Trim();
                 process.WaitForExit();
                 if (process.ExitCode != 0)
                 {
-                    MessageBox.Show("程序异常退出，退出码：" + process.ExitCode,
+                    if (errorOutput.Length > 1800)
+                    {
+                        errorOutput = errorOutput.Substring(0, 1800) + "…";
+                    }
+                    string message = "程序异常退出，退出码：" + process.ExitCode;
+                    if (errorOutput.Length > 0)
+                    {
+                        message += "\n\n" + errorOutput;
+                    }
+                    MessageBox.Show(message,
                         "本地网络策略管理器", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
