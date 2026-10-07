@@ -24,9 +24,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 - 首屏用 4 个状态卡展示“规则状态 / 已连接网卡 / 当前默认出口 / 待处理现有策略”；
 - 对未纳入管理的现有路由进行只读展示，并支持 Ctrl / Shift 多选后批量“导入”或“导入并接管”；
 - 自动识别窗口按“特定路由 / 网卡概览 / 代理绕过”三个视角展示，并可导出完整诊断快照；
-- 主规则列表支持名称、目标地址、网卡、网关和状态搜索，以及按“已应用 / 未应用 / 异常 / 已禁用”过滤；
+- 主规则列表支持名称、分组、标签、目标地址、网卡、网关和状态搜索，可同时按分组与“已应用 / 未应用 / 异常 / 已禁用”过滤；
 - 右侧规则详情区集中展示期望出口、实际状态、代理绕过和所有权，并提供应用、诊断、修改、撤销、删除与复制详情；
-- 新增、修改、删除 IPv4 主机或 CIDR 网段规则；
+- 新增、修改、删除 IPv4 主机或 CIDR 网段规则，并可设置可选分组与标签；
+- 分组筛选后“应用全部”自动切换为“应用分组”，整组必须先完成逐条 Plan，任一规则被阻止则整组不开始执行；
 - 按网卡硬件 GUID 识别设备，不依赖会变化的接口编号或“网络 235”名称；
 - 使用网卡当前默认网关，或手动指定离线网络网关；
 - 为浏览器访问的精确 IPv4 地址增加/移除系统代理绕过；
@@ -56,6 +57,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 .\本地网络策略管理器.ps1 -Command Audit
 .\本地网络策略管理器.ps1 -Command ExplainAddress -Address 172.16.11.205
 .\本地网络策略管理器.ps1 -Command ListRules
+.\本地网络策略管理器.ps1 -Command ListGroups
+.\本地网络策略管理器.ps1 -Command PlanGroup -Group '现场A' -Action Apply
 .\本地网络策略管理器.ps1 -Command TestRule -RuleId <id>
 .\本地网络策略管理器.ps1 -Command PlanRule -RuleId <id> -Action Apply
 .\本地网络策略管理器.ps1 -Command CreateBackup
