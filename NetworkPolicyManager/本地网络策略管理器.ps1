@@ -180,7 +180,7 @@ function New-SafetySnapshot {
             InterfaceAlias = [string]$_.InterfaceAlias
             Gateway = [string]$_.NextHop
             Metric = [int]$_.RouteMetric
-            PolicyStore = [string]$_.PolicyStore
+            PolicyStore = if ($_.PSObject.Properties.Name -contains 'PolicyStore') { [string]$_.PolicyStore } else { '' }
         }
     })
 
