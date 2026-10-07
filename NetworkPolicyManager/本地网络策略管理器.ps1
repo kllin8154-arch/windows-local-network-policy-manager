@@ -1222,6 +1222,34 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
             Get-NetworkPolicyDiscovery | ConvertTo-Json -Depth 8
             exit 0
         }
+        'Audit' {
+            Get-PolicyAudit | ConvertTo-Json -Depth 10
+            exit 0
+        }
+        'PlanRule' {
+            if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'PlanRule 需要 -RuleId。' }
+            Get-RulePlan -Rule (Get-RuleById -Id $RuleId) -Action $Action | ConvertTo-Json -Depth 10
+            exit 0
+        }
+        'CreateBackup' {
+            New-SafetySnapshot -Reason 'manual-cli-backup' -RuleId $RuleId | ConvertTo-Json -Depth 6
+            exit 0
+        }
+        'ListBackups' {
+            @(Get-SafetyBackupList) | ConvertTo-Json -Depth 6
+            exit 0
+        }
+        'RestoreRules' {
+            if ([string]::IsNullOrWhiteSpace($BackupId)) { throw 'RestoreRules 需要 -BackupId。' }
+            if (-not $Approved) { throw 'RestoreRules 会替换规则定义；需要显式传入 -Approved。' }
+            $lock = Enter-MutationLock
+            try {
+                Restore-RulesFromSafetyBackup -Id $BackupId | ConvertTo-Json -Depth 8
+            } finally {
+                Exit-MutationLock -Mutex $lock
+            }
+            exit 0
+        }
         'SaveRule' {
             if ([string]::IsNullOrWhiteSpace($RuleJson)) { throw 'SaveRule 需要 -RuleJson。' }
             $incoming = $RuleJson | ConvertFrom-Json
@@ -1239,8 +1267,10 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
                 OwnExistingRoute = [bool]$incoming.OwnExistingRoute
                 OwnExistingProxy = [bool]$incoming.OwnExistingProxy
             }
+            $lock = Enter-MutationLock
             $oldRules = @($script:Rules)
             try {
+                [void](New-SafetySnapshot -Reason 'before-save-rule' -RuleId $id)
                 $script:Rules = @($script:Rules | Where-Object Id -ne $id)
                 $script:Rules += $rule
                 Assert-Configuration
@@ -1251,6 +1281,8 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
             } catch {
                 $script:Rules = $oldRules
                 throw
+            } finally {
+                Exit-MutationLock -Mutex $lock
             }
         }
         'TestRule' {
@@ -1262,7 +1294,7 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
             if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'ApplyRule 需要 -RuleId。' }
             if (-not $Approved) { throw 'ApplyRule 会修改 Windows 路由/代理；需要显式传入 -Approved。' }
             $rule = Get-RuleById -Id $RuleId
-            Apply-RulePolicy -Rule $rule
+            Apply-RulePolicy -Rule $rule -ExpectedFingerprint $ExpectedFingerprint
             Test-RulePolicy -Rule $rule | ConvertTo-Json -Depth 8
             exit 0
         }
@@ -1270,7 +1302,7 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
             if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'RemoveRule 需要 -RuleId。' }
             if (-not $Approved) { throw 'RemoveRule 会修改 Windows 路由/代理；需要显式传入 -Approved。' }
             $rule = Get-RuleById -Id $RuleId
-            Remove-RulePolicy -Rule $rule
+            Remove-RulePolicy -Rule $rule -ExpectedFingerprint $ExpectedFingerprint
             [pscustomobject]@{ Removed = $true; RuleId = $RuleId } | ConvertTo-Json
             exit 0
         }
