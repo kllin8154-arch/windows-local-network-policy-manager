@@ -2008,6 +2008,194 @@ function Show-DiscoveryDialog {
     [void]$dialog.ShowDialog($form)
 }
 
+function Show-SafetyCenter {
+    $dialog = [Windows.Forms.Form]::new()
+    $dialog.Text = '安全中心'
+    $dialog.ClientSize = [Drawing.Size]::new(1060, 680)
+    $dialog.MinimumSize = [Drawing.Size]::new(900, 580)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+    $dialog.BackColor = $script:Theme.Background
+    $dialog.ForeColor = $script:Theme.WarmText
+
+    $header = [Windows.Forms.Panel]::new()
+    $header.Dock = 'Top'
+    $header.Height = 82
+    $header.BackColor = $script:Theme.Background
+    $dialog.Controls.Add($header)
+
+    $title = [Windows.Forms.Label]::new()
+    $title.Text = '策略安全与恢复'
+    $title.Font = [Drawing.Font]::new('Microsoft YaHei UI', 15, [Drawing.FontStyle]::Bold)
+    $title.ForeColor = $script:Theme.Accent
+    $title.AutoSize = $true
+    $title.Location = [Drawing.Point]::new(18, 12)
+    $header.Controls.Add($title)
+
+    $sub = [Windows.Forms.Label]::new()
+    $sub.Text = '审计当前规则风险，管理本机安全快照。规则恢复不会直接回放旧 Windows 路由。'
+    $sub.ForeColor = $script:Theme.MutedText
+    $sub.AutoSize = $true
+    $sub.Location = [Drawing.Point]::new(20, 49)
+    $header.Controls.Add($sub)
+
+    $tabs = [Windows.Forms.TabControl]::new()
+    $tabs.Dock = 'Fill'
+    $dialog.Controls.Add($tabs)
+
+    $auditTab = [Windows.Forms.TabPage]::new('策略审计')
+    $auditTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($auditTab)
+
+    $backupTab = [Windows.Forms.TabPage]::new('安全快照')
+    $backupTab.BackColor = $script:Theme.Background
+    $tabs.TabPages.Add($backupTab)
+
+    $auditBox = [Windows.Forms.RichTextBox]::new()
+    $auditBox.Dock = 'Fill'
+    $auditBox.ReadOnly = $true
+    $auditBox.BorderStyle = 'None'
+    $auditBox.BackColor = $script:Theme.Surface
+    $auditBox.ForeColor = $script:Theme.WarmText
+    $auditBox.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9)
+    $auditTab.Controls.Add($auditBox)
+
+    $backupGrid = [Windows.Forms.DataGridView]::new()
+    $backupGrid.Dock = 'Fill'
+    $backupGrid.ReadOnly = $true
+    $backupGrid.AllowUserToAddRows = $false
+    $backupGrid.AllowUserToDeleteRows = $false
+    $backupGrid.RowHeadersVisible = $false
+    $backupGrid.SelectionMode = 'FullRowSelect'
+    $backupGrid.MultiSelect = $false
+    $backupGrid.AutoGenerateColumns = $false
+    Initialize-GridTheme -Grid $backupGrid
+    $backupTab.Controls.Add($backupGrid)
+
+    foreach ($spec in @(
+        @('CreatedAt','时间',180),
+        @('Reason','原因',220),
+        @('RuleId','关联规则',180),
+        @('Integrity','完整性',90),
+        @('Id','Backup ID',210)
+    )) {
+        $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $spec[0]
+        $column.HeaderText = $spec[1]
+        $column.Width = [int]$spec[2]
+        if ($spec[0] -eq 'Id') { $column.AutoSizeMode = 'Fill' }
+        [void]$backupGrid.Columns.Add($column)
+    }
+
+    $buttons = [Windows.Forms.FlowLayoutPanel]::new()
+    $buttons.Dock = 'Bottom'
+    $buttons.Height = 58
+    $buttons.Padding = [Windows.Forms.Padding]::new(8, 4, 12, 4)
+    $buttons.FlowDirection = 'RightToLeft'
+    $buttons.BackColor = $script:Theme.Background
+    $dialog.Controls.Add($buttons)
+
+    $closeButton = New-UiButton -Text '关闭' -Width 88
+    $refreshSafetyButton = New-UiButton -Text '重新审计' -Width 96
+    $createSnapshotButton = New-UiButton -Text '创建快照' -Width 96 -Variant 'Accent'
+    $restoreSnapshotButton = New-UiButton -Text '恢复所选规则' -Width 112 -Variant 'Danger'
+    $buttons.Controls.Add($closeButton)
+    $buttons.Controls.Add($restoreSnapshotButton)
+    $buttons.Controls.Add($createSnapshotButton)
+    $buttons.Controls.Add($refreshSafetyButton)
+
+    $refreshSafety = {
+        $audit = Get-PolicyAudit
+        $lines = [Collections.Generic.List[string]]::new()
+        $lines.Add("健康状态：$(if ($audit.Healthy) { '通过' } else { '需要处理' })")
+        $lines.Add("Critical=$($audit.Summary.Critical)  Error=$($audit.Summary.Error)  Warning=$($audit.Summary.Warning)  Info=$($audit.Summary.Info)")
+        $lines.Add('')
+        if (@($audit.Issues).Count -eq 0) {
+            $lines.Add('没有发现规则审计问题。')
+        } else {
+            foreach ($issue in @($audit.Issues)) {
+                $other = if ($issue.PSObject.Properties.Name -contains 'OtherRuleName' -and
+                    -not [string]::IsNullOrWhiteSpace([string]$issue.OtherRuleName)) {
+                    " / $($issue.OtherRuleName)"
+                } else { '' }
+                $lines.Add("[$($issue.Severity)] $($issue.RuleName)$other")
+                $lines.Add("  $($issue.Message)")
+                $lines.Add('')
+            }
+        }
+        $auditBox.Text = $lines -join [Environment]::NewLine
+
+        $backupGrid.Rows.Clear()
+        foreach ($backup in @(Get-SafetyBackupList)) {
+            $rowIndex = $backupGrid.Rows.Add(
+                [string]$backup.CreatedAt,
+                [string]$backup.Reason,
+                [string]$backup.RuleId,
+                $(if ($backup.IntegrityOk) { '正常' } else { '失败' }),
+                [string]$backup.Id
+            )
+            $backupGrid.Rows[$rowIndex].Tag = $backup
+            if (-not [bool]$backup.IntegrityOk) {
+                $backupGrid.Rows[$rowIndex].DefaultCellStyle.BackColor = $script:Theme.AccentStrong
+                $backupGrid.Rows[$rowIndex].DefaultCellStyle.ForeColor = $script:Theme.WarmText
+            }
+        }
+    }
+
+    $closeButton.Add_Click({ $dialog.Close() })
+    $refreshSafetyButton.Add_Click({ & $refreshSafety })
+    $createSnapshotButton.Add_Click({
+        try {
+            $backup = New-SafetySnapshot -Reason 'manual-gui-backup'
+            [Windows.Forms.MessageBox]::Show(
+                "安全快照已创建：$($backup.Id)",
+                '快照完成', 'OK', 'Information') | Out-Null
+            & $refreshSafety
+        } catch {
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, '创建快照失败', 'OK', 'Error') | Out-Null
+        }
+    })
+    $restoreSnapshotButton.Add_Click({
+        if ($backupGrid.SelectedRows.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show('请先选择一个安全快照。', '提示', 'OK', 'Information') | Out-Null
+            return
+        }
+        $backup = $backupGrid.SelectedRows[0].Tag
+        if (-not [bool]$backup.IntegrityOk) {
+            [Windows.Forms.MessageBox]::Show('该快照完整性校验失败，禁止恢复。', '禁止恢复', 'OK', 'Error') | Out-Null
+            return
+        }
+        $answer = [Windows.Forms.MessageBox]::Show(
+            "将从快照 $($backup.Id) 恢复规则定义。" +
+            [Environment]::NewLine +
+            '不会直接修改 Windows 路由；恢复后的已有路由/代理所有权标记会被清除。是否继续？',
+            '确认恢复规则', 'YesNo', 'Warning')
+        if ($answer -ne 'Yes') { return }
+
+        $lock = $null
+        try {
+            $lock = Enter-MutationLock
+            $result = Restore-RulesFromSafetyBackup -Id ([string]$backup.Id)
+            [Windows.Forms.MessageBox]::Show(
+                "已恢复 $($result.RuleCount) 条规则。" +
+                [Environment]::NewLine +
+                "恢复前快照：$($result.PreRestoreBackupId)" +
+                [Environment]::NewLine +
+                '请重新审计并按需应用规则。',
+                '恢复完成', 'OK', 'Information') | Out-Null
+            Refresh-Grid
+            & $refreshSafety
+        } catch {
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, '恢复失败', 'OK', 'Error') | Out-Null
+        } finally {
+            Exit-MutationLock -Mutex $lock
+        }
+    })
+
+    & $refreshSafety
+    [void]$dialog.ShowDialog($form)
+}
+
 $form = [Windows.Forms.Form]::new()
 $form.Text = '本地网络策略管理器'
 $form.StartPosition = 'CenterScreen'
@@ -2130,8 +2318,9 @@ $applyAllButton = New-UiButton -Text '应用全部' -Width 92 -Variant 'Primary'
 $refreshButton = New-UiButton -Text '刷新' -Width 78
 $backupButton = New-UiButton -Text '备份规则' -Width 92
 $restoreButton = New-UiButton -Text '导入备份' -Width 92
+$safetyButton = New-UiButton -Text '安全中心' -Width 92 -Variant 'Accent'
 
-@($discoverButton, $addButton, $applyAllButton, $refreshButton, $backupButton, $restoreButton) |
+@($discoverButton, $addButton, $applyAllButton, $refreshButton, $safetyButton, $backupButton, $restoreButton) |
     ForEach-Object { [void]$toolbar.Controls.Add($_) }
 
 $searchLabel = [Windows.Forms.Label]::new()
@@ -2760,6 +2949,8 @@ $grid.Add_SelectionChanged({ Update-RuleDetail })
 
 $searchBox.Add_TextChanged({ Render-RuleGrid })
 $filterBox.Add_SelectedIndexChanged({ Render-RuleGrid })
+
+$safetyButton.Add_Click({ Show-SafetyCenter })
 
 $backupButton.Add_Click({
     try { Backup-RulesToFile } catch {
