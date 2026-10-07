@@ -20,6 +20,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:AppRoot = $PSScriptRoot
+$script:CoreRoot = Join-Path $script:AppRoot 'Core'
+foreach ($coreModule in @('NetworkMath.ps1','AdapterClassification.ps1','ProxyRules.ps1')) {
+    $corePath = Join-Path $script:CoreRoot $coreModule
+    if (-not (Test-Path -LiteralPath $corePath)) { throw "缺少核心模块：$corePath" }
+    . $corePath
+}
 $script:RulesPath = Join-Path $script:AppRoot 'network-rules.json'
 $script:DefaultRulesPath = Join-Path $script:AppRoot 'network-rules.default.json'
 $script:StatePath = Join-Path $script:AppRoot 'manager-state.json'
@@ -117,17 +123,19 @@ function Save-State {
 }
 
 function Enter-MutationLock {
+    param([ValidateRange(1,60)][int]$TimeoutSeconds = 15)
+
     $mutex = [Threading.Mutex]::new($false, $script:MutationMutexName)
     $acquired = $false
     try {
         try {
-            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(15))
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
         } catch [Threading.AbandonedMutexException] {
             $acquired = $true
         }
         if (-not $acquired) {
             $mutex.Dispose()
-            throw '另一个管理器或 MCP 正在修改网络策略。请等待当前操作完成后重试。'
+            throw "另一个管理器或 MCP 正在修改网络策略；等待 $TimeoutSeconds 秒后仍未释放。请稍后重试。"
         }
         return $mutex
     } catch {
@@ -343,135 +351,6 @@ function Get-NormalizedGuid {
     try { ([Guid]$Value).ToString('B').ToUpperInvariant() } catch { $Value.ToUpperInvariant() }
 }
 
-function ConvertTo-NormalizedPrefix {
-    param([Parameter(Mandatory)][string]$Value)
-
-    $trimmed = $Value.Trim()
-    if ($trimmed -notmatch '/') {
-        $trimmed += '/32'
-    }
-    $parts = $trimmed.Split('/')
-    if ($parts.Count -ne 2) {
-        throw "无效的 IPv4/CIDR：$Value"
-    }
-    $address = $null
-    if (-not [Net.IPAddress]::TryParse($parts[0], [ref]$address) -or $address.AddressFamily -ne 'InterNetwork') {
-        throw "无效的 IPv4 地址：$Value"
-    }
-    $prefixLength = 0
-    if (-not [int]::TryParse($parts[1], [ref]$prefixLength) -or $prefixLength -lt 0 -or $prefixLength -gt 32) {
-        throw "无效的 IPv4 前缀长度：$Value"
-    }
-
-    $bytes = $address.GetAddressBytes()
-    $network = [byte[]]::new(4)
-    for ($i = 0; $i -lt 4; $i++) {
-        $remaining = $prefixLength - ($i * 8)
-        $mask = if ($remaining -ge 8) { 255 } elseif ($remaining -le 0) { 0 } else {
-            [int](256 - [Math]::Pow(2, 8 - $remaining))
-        }
-        $network[$i] = [byte]($bytes[$i] -band $mask)
-    }
-    '{0}/{1}' -f ([Net.IPAddress]::new($network)).ToString(), $prefixLength
-}
-
-function ConvertTo-RouteParts {
-    param([Parameter(Mandatory)][string]$Prefix)
-
-    $normalized = ConvertTo-NormalizedPrefix -Value $Prefix
-    $parts = $normalized.Split('/')
-    $prefixLength = [int]$parts[1]
-    $maskBytes = [byte[]]::new(4)
-    for ($i = 0; $i -lt 4; $i++) {
-        $remaining = $prefixLength - ($i * 8)
-        $maskBytes[$i] = if ($remaining -ge 8) { 255 } elseif ($remaining -le 0) { 0 } else {
-            [byte](256 - [Math]::Pow(2, 8 - $remaining))
-        }
-    }
-    [pscustomobject]@{
-        Destination = $parts[0]
-        Mask = ([Net.IPAddress]::new($maskBytes)).ToString()
-        PrefixLength = $prefixLength
-    }
-}
-
-function Test-IPv4Address {
-    param([Parameter(Mandatory)][string]$Value)
-
-    $address = $null
-    [Net.IPAddress]::TryParse($Value, [ref]$address) -and $address.AddressFamily -eq 'InterNetwork'
-}
-
-function Get-ObjectPropertyValue {
-    param(
-        [Parameter(Mandatory)]$Object,
-        [Parameter(Mandatory)][string]$Name,
-        $Default = $null
-    )
-    if ($Object.PSObject.Properties.Name -contains $Name -and $null -ne $Object.$Name) {
-        return $Object.$Name
-    }
-    $Default
-}
-
-function Get-AdapterClassification {
-    param([Parameter(Mandatory)]$Adapter)
-
-    $name = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'Name' -Default '')
-    $description = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'InterfaceDescription' -Default '')
-    $hardware = [bool](Get-ObjectPropertyValue -Object $Adapter -Name 'HardwareInterface' -Default $false)
-    $virtualFlag = [bool](Get-ObjectPropertyValue -Object $Adapter -Name 'Virtual' -Default $false)
-    $media = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'MediaType' -Default '')
-    $physicalMedia = [string](Get-ObjectPropertyValue -Object $Adapter -Name 'PhysicalMediaType' -Default '')
-    $text = "$name $description $media $physicalMedia"
-
-    $provider = ''
-    if ($text -match '(?i)Hyper-V|vEthernet') { $provider = 'Hyper-V' }
-    elseif ($text -match '(?i)VMware') { $provider = 'VMware' }
-    elseif ($text -match '(?i)VirtualBox|VBox') { $provider = 'VirtualBox' }
-    elseif ($text -match '(?i)WSL|Windows Subsystem for Linux') { $provider = 'WSL' }
-    elseif ($text -match '(?i)Docker') { $provider = 'Docker' }
-    elseif ($text -match '(?i)Tailscale') { $provider = 'Tailscale' }
-    elseif ($text -match '(?i)ZeroTier') { $provider = 'ZeroTier' }
-    elseif ($text -match '(?i)Wintun|WireGuard') { $provider = 'Wintun/WireGuard' }
-    elseif ($text -match '(?i)OpenVPN|\bTAP\b|\bTUN\b') { $provider = 'TAP/TUN' }
-    elseif ($text -match '(?i)VPN|Fortinet|AnyConnect|GlobalProtect') { $provider = 'VPN' }
-
-    $isWireless = $text -match '(?i)802.11|Wi-?Fi|Wireless|WLAN'
-    $isBluetooth = $text -match '(?i)Bluetooth'
-    $isTunnel = $text -match '(?i)Tunnel|Teredo|6to4|isatap|Wintun|WireGuard|TAP|TUN|VPN|ZeroTier|Tailscale'
-    $isVirtual = $virtualFlag -or -not $hardware -or -not [string]::IsNullOrWhiteSpace($provider) -or
-        $text -match '(?i)Virtual|vEthernet|VMware|VirtualBox|Hyper-V|WSL|Docker'
-    $isLoopback = $text -match '(?i)Loopback'
-
-    $kind = if ($isLoopback) {
-        'Loopback'
-    } elseif ($isTunnel) {
-        'Tunnel/VPN'
-    } elseif ($isVirtual) {
-        'Virtual'
-    } elseif ($isWireless) {
-        'Wi-Fi'
-    } elseif ($isBluetooth) {
-        'Bluetooth'
-    } elseif ($hardware) {
-        'Ethernet'
-    } else {
-        'Other'
-    }
-
-    [pscustomobject]@{
-        Kind = $kind
-        IsPhysical = [bool]($hardware -and -not $isVirtual)
-        IsVirtual = [bool]$isVirtual
-        IsWireless = [bool]$isWireless
-        IsTunnel = [bool]$isTunnel
-        VirtualProvider = $provider
-        MediaType = $media
-        PhysicalMediaType = $physicalMedia
-    }
-}
-
 function Get-Adapters {
     $ipInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)
     $metricByIndex = @{}
@@ -668,13 +547,7 @@ public static class NetworkPolicyManagerWinInet {
 
 function Get-ProxyTokenForRule {
     param([Parameter(Mandatory)]$Rule)
-
-    if (-not [bool]$Rule.BypassProxy) { return '' }
-    $parts = (ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)).Split('/')
-    if ([int]$parts[1] -ne 32) {
-        throw '系统代理绕过仅支持单个 IPv4（/32），不支持 CIDR 网段。'
-    }
-    [string]$parts[0]
+    Get-RuleProxyToken -Rule $Rule
 }
 
 function Get-ExactRoutes {
@@ -1158,54 +1031,6 @@ function Get-RepairPlan {
         Fingerprint = [string]$plan.Fingerprint
         Plan = $plan
     }
-}
-
-function ConvertTo-IPv4UInt64 {
-    param([Parameter(Mandatory)][string]$Address)
-    $ip = $null
-    if (-not [Net.IPAddress]::TryParse($Address, [ref]$ip) -or $ip.AddressFamily -ne 'InterNetwork') {
-        throw "无效的 IPv4 地址：$Address"
-    }
-    $b = $ip.GetAddressBytes()
-    ([uint64]$b[0] -shl 24) -bor ([uint64]$b[1] -shl 16) -bor ([uint64]$b[2] -shl 8) -bor [uint64]$b[3]
-}
-
-function Get-PrefixRange {
-    param([Parameter(Mandatory)][string]$Prefix)
-    $normalized = ConvertTo-NormalizedPrefix -Value $Prefix
-    $parts = $normalized.Split('/')
-    $start = ConvertTo-IPv4UInt64 -Address $parts[0]
-    $length = [int]$parts[1]
-    $size = if ($length -eq 0) { [uint64]4294967296 } else { [uint64]1 -shl (32 - $length) }
-    [pscustomobject]@{
-        Prefix = $normalized
-        PrefixLength = $length
-        Start = $start
-        End = $start + $size - 1
-    }
-}
-
-function Test-PrefixOverlap {
-    param(
-        [Parameter(Mandatory)][string]$Left,
-        [Parameter(Mandatory)][string]$Right
-    )
-    $a = Get-PrefixRange -Prefix $Left
-    $b = Get-PrefixRange -Prefix $Right
-    $a.Start -le $b.End -and $b.Start -le $a.End
-}
-function Test-IPv4InPrefix {
-    param(
-        [Parameter(Mandatory)][string]$Address,
-        [Parameter(Mandatory)][string]$Prefix
-    )
-
-    if (-not (Test-IPv4Address -Value $Address)) {
-        throw "无效的 IPv4 地址：$Address"
-    }
-    $value = ConvertTo-IPv4UInt64 -Address $Address
-    $range = Get-PrefixRange -Prefix $Prefix
-    $value -ge $range.Start -and $value -le $range.End
 }
 
 function Get-RoutePropertyInt {
@@ -1695,13 +1520,7 @@ function Get-RulePlan {
     $previousProxyOwned = $null -ne $state -and [bool]$state.ProxyOwned
     $previousProxyPresent = -not [string]::IsNullOrWhiteSpace($previousProxyToken) -and
         $previousProxyToken -in @($snapshot.ProxyTokens)
-    $otherRuleUsesPreviousProxy = $false
-    if (-not [string]::IsNullOrWhiteSpace($previousProxyToken)) {
-        $otherRuleUsesPreviousProxy = @($script:Rules | Where-Object {
-            $_.Id -ne $Rule.Id -and [bool]$_.BypassProxy -and
-            $(try { (Get-ProxyTokenForRule -Rule $_) -eq $previousProxyToken } catch { $false })
-        }).Count -gt 0
-    }
+    $otherRuleUsesPreviousProxy = Test-OtherRuleUsesProxyToken -Rules @($script:Rules) -ExcludeRuleId ([string]$Rule.Id) -Token $previousProxyToken
 
     if ($Action -eq 'Apply') {
         if ($null -eq $desired) {
@@ -2166,10 +1985,7 @@ function Invoke-ApplyRulePolicyCore {
         if ($null -ne $previous -and [bool]$previous.ProxyOwned) {
             $oldProxyToken = [string]$previous.ProxyToken
             if (-not [string]::IsNullOrWhiteSpace($oldProxyToken) -and $oldProxyToken -ne $proxyToken) {
-                $otherRuleUsesOldProxy = @($script:Rules | Where-Object {
-                    $_.Id -ne $Rule.Id -and [bool]$_.BypassProxy -and
-                    $(try { (Get-ProxyTokenForRule -Rule $_) -eq $oldProxyToken } catch { $false })
-                }).Count -gt 0
+                $otherRuleUsesOldProxy = Test-OtherRuleUsesProxyToken -Rules @($script:Rules) -ExcludeRuleId ([string]$Rule.Id) -Token $oldProxyToken
                 $tokensBefore = @(Get-ProxyTokens)
                 if (-not $otherRuleUsesOldProxy -and $oldProxyToken -in $tokensBefore) {
                     Set-ProxyTokens -Tokens @($tokensBefore | Where-Object { $_ -ne $oldProxyToken })
@@ -2285,10 +2101,7 @@ function Invoke-RemoveRulePolicyCore {
     }
     $proxyOwned = ($null -ne $state -and [bool]$state.ProxyOwned) -or [bool]$Rule.OwnExistingProxy
     if ($proxyOwned -and -not [string]::IsNullOrWhiteSpace($proxyToken)) {
-        $otherRuleUsesToken = @($script:Rules | Where-Object {
-            $_.Id -ne $Rule.Id -and [bool]$_.BypassProxy -and
-            (Get-ProxyTokenForRule -Rule $_) -eq $proxyToken
-        }).Count -gt 0
+        $otherRuleUsesToken = Test-OtherRuleUsesProxyToken -Rules @($script:Rules) -ExcludeRuleId ([string]$Rule.Id) -Token $proxyToken
         if (-not $otherRuleUsesToken) {
             Set-ProxyTokens -Tokens @((Get-ProxyTokens) | Where-Object { $_ -ne $proxyToken })
         }
@@ -2578,7 +2391,120 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
     }
 }
 
+function Invoke-InternalSafetySelfTest {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('wl npm-safety-' + [Guid]::NewGuid().ToString('N'))
+    $oldBackupRoot = $script:BackupRoot
+    [void](New-Item -ItemType Directory -Path $tempRoot -Force)
+
+    try {
+        $atomicPath = Join-Path $tempRoot 'atomic.json'
+        Write-JsonAtomic -Path $atomicPath -Value ([ordered]@{ Name='atomic'; Value=42 }) -Depth 4
+        $atomic = Get-Content -LiteralPath $atomicPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$atomic.Name -ne 'atomic' -or [int]$atomic.Value -ne 42) {
+            throw '原子 JSON 写入验证失败。'
+        }
+
+        $script:BackupRoot = $tempRoot
+        $id = '20260101-010101-abcdef12'
+        $backupPath = Join-Path $tempRoot ("snapshot-$id.json")
+        $payload = [ordered]@{
+            Format = 'windows-local-network-policy-manager/safety-snapshot'
+            Version = 1
+            Id = $id
+            CreatedAt = (Get-Date).ToString('o')
+            ComputerName = $env:COMPUTERNAME
+            UserName = $env:USERNAME
+            Reason = 'internal-safety-self-test'
+            RuleId = ''
+            Rules = @()
+            State = @()
+            ProxyTokens = @()
+            ManagedRoutes = @()
+            DefaultRoutes = @()
+        }
+
+        Write-JsonAtomic -Path $backupPath -Value $payload -Depth 8
+        $hash = (Get-FileHash -LiteralPath $backupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath ($backupPath + '.sha256') -Value $hash -Encoding ASCII
+
+        $validated = Get-SafetyBackupById -Id $id
+        if ([string]$validated.Id -ne $id) { throw '安全快照正常校验失败。' }
+
+        Add-Content -LiteralPath $backupPath -Value 'tamper'
+        $tamperRejected = $false
+        try { [void](Get-SafetyBackupById -Id $id) } catch { $tamperRejected = $true }
+        if (-not $tamperRejected) { throw '被篡改快照未被 SHA256 拒绝。' }
+
+        $payload.ComputerName = 'OTHER-' + [string]$env:COMPUTERNAME
+        Write-JsonAtomic -Path $backupPath -Value $payload -Depth 8
+        $hash = (Get-FileHash -LiteralPath $backupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath ($backupPath + '.sha256') -Value $hash -Encoding ASCII
+        $crossMachineRejected = $false
+        try { [void](Get-SafetyBackupById -Id $id) } catch { $crossMachineRejected = $true }
+        if (-not $crossMachineRejected) { throw '其他计算机快照未被拒绝。' }
+
+        $mutex = $null
+        try {
+            $mutex = Enter-MutationLock -TimeoutSeconds 2
+            if ($null -eq $mutex) { throw 'Mutation Mutex 获取失败。' }
+        } finally {
+            Exit-MutationLock -Mutex $mutex
+        }
+
+        $signalPath = Join-Path $tempRoot 'mutex-held.txt'
+        $job = Start-Job -ArgumentList $script:MutationMutexName, $signalPath -ScriptBlock {
+            param($MutexName,$SignalPath)
+            $m = [Threading.Mutex]::new($false, $MutexName)
+            $ok = $false
+            try {
+                $ok = $m.WaitOne([TimeSpan]::FromSeconds(5))
+                if (-not $ok) { throw 'background mutex acquisition failed' }
+                Set-Content -LiteralPath $SignalPath -Value 'held' -Encoding ASCII
+                Start-Sleep -Seconds 3
+            } finally {
+                if ($ok) { try { $m.ReleaseMutex() } catch { } }
+                $m.Dispose()
+            }
+        }
+        try {
+            $deadline = (Get-Date).AddSeconds(5)
+            while (-not (Test-Path -LiteralPath $signalPath) -and (Get-Date) -lt $deadline) {
+                Start-Sleep -Milliseconds 100
+            }
+            if (-not (Test-Path -LiteralPath $signalPath)) { throw '并发锁测试后台进程未就绪。' }
+
+            $contentionRejected = $false
+            $unexpectedMutex = $null
+            try {
+                $unexpectedMutex = Enter-MutationLock -TimeoutSeconds 1
+            } catch {
+                $contentionRejected = $true
+            } finally {
+                Exit-MutationLock -Mutex $unexpectedMutex
+            }
+            if (-not $contentionRejected) { throw '并发 Mutation Mutex 未阻止第二个写入者。' }
+        } finally {
+            Wait-Job -Job $job -Timeout 8 | Out-Null
+            Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+
+        [pscustomobject]@{
+            AtomicWrite = $true
+            TamperRejected = $true
+            CrossMachineRejected = $true
+            MutexAcquireRelease = $true
+            MutexContentionRejected = $true
+        }
+    } finally {
+        $script:BackupRoot = $oldBackupRoot
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 if ($SelfTest) {
+    $safetySelfTest = Invoke-InternalSafetySelfTest
+    "SAFETY_SELF_TEST_OK atomic=$($safetySelfTest.AtomicWrite) tamper=$($safetySelfTest.TamperRejected) crossMachine=$($safetySelfTest.CrossMachineRejected) mutex=$($safetySelfTest.MutexAcquireRelease) contention=$($safetySelfTest.MutexContentionRejected)"
     "SELF_TEST_OK rules=$($script:Rules.Count) state=$($script:State.Count)"
     exit 0
 }
@@ -2700,6 +2626,7 @@ function Show-RuleEditor {
 
     $isEdit = $null -ne $Rule
     $dialog = [Windows.Forms.Form]::new()
+    $dialog.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
     $dialog.Text = if ($isEdit) { '修改通信规则' } else { '新增通信规则' }
     $dialog.ClientSize = [Drawing.Size]::new(660, 535)
     $dialog.FormBorderStyle = 'FixedDialog'
@@ -2893,6 +2820,7 @@ function Show-RuleEditor {
 function Show-DiscoveryDialog {
     $discovery = Get-NetworkPolicyDiscovery
     $dialog = [Windows.Forms.Form]::new()
+    $dialog.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
     $dialog.Text = '自动识别当前网络策略'
     $dialog.ClientSize = [Drawing.Size]::new(1120, 700)
     $dialog.MinimumSize = [Drawing.Size]::new(940, 600)
@@ -3384,6 +3312,7 @@ function Show-AddressExplainDialog {
     param([string]$InitialAddress = '')
 
     $dialog = [Windows.Forms.Form]::new()
+    $dialog.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
     $dialog.Text = '选路解释器'
     $dialog.ClientSize = [Drawing.Size]::new(1080, 700)
     $dialog.MinimumSize = [Drawing.Size]::new(900, 600)
@@ -3620,6 +3549,7 @@ function Show-AddressExplainDialog {
 
 function Show-SafetyCenter {
     $dialog = [Windows.Forms.Form]::new()
+    $dialog.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
     $dialog.Text = '安全中心'
     $dialog.ClientSize = [Drawing.Size]::new(1100, 720)
     $dialog.MinimumSize = [Drawing.Size]::new(940, 620)
@@ -4002,6 +3932,7 @@ function Show-SafetyCenter {
 }
 
 $form = [Windows.Forms.Form]::new()
+$form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
 $form.Text = '本地网络策略管理器'
 $form.StartPosition = 'CenterScreen'
 $form.Size = [Drawing.Size]::new(1380, 860)
