@@ -31,7 +31,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 - 使用网卡当前默认网关，或手动指定离线网络网关；
 - 为浏览器访问的精确 IPv4 地址增加/移除系统代理绕过；
 - 支持增强诊断：检查期望网卡、实际选路、下一跳、代理绕过和管理状态；
-- 支持规则备份与安全导入；导入前自动备份当前规则，且导入不会立即修改 Windows 网络；
+- 支持规则备份、安全快照和安全恢复；Apply/Remove 前自动快照，快照带 SHA256；恢复规则不会立即修改 Windows 网络；
+- 支持规则重叠审计、默认路由保护、单写锁和 Plan Fingerprint，避免复杂规则或并发操作导致误改；
 - 支持 15 秒可选自动刷新、日志折叠和 F5 / Ctrl+F / Ctrl+N / Ctrl+D 快捷键；
 - 只管理精确路由，不修改默认路由、IP、DHCP 或接口跃点。
 
@@ -46,17 +47,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\
 
 ## 命令行 / MCP 接口
 
-主脚本同时提供供程序调用的命令入口：
+主脚本同时提供供程序和 MCP 调用的命令入口：
 
 ```powershell
 .\本地网络策略管理器.ps1 -Command Discover
+.\本地网络策略管理器.ps1 -Command Audit
 .\本地网络策略管理器.ps1 -Command ListRules
 .\本地网络策略管理器.ps1 -Command TestRule -RuleId <id>
+.\本地网络策略管理器.ps1 -Command PlanRule -RuleId <id> -Action Apply
+.\本地网络策略管理器.ps1 -Command CreateBackup
+.\本地网络策略管理器.ps1 -Command ListBackups
 ```
 
-`ApplyRule` 和 `RemoveRule` 会修改系统网络，除管理员权限外还必须显式带 `-Approved`。
+高风险 Apply/Remove 支持 `-ExpectedFingerprint`，用于拒绝 Plan 之后已经变化的网络状态；仍要求 `-Approved` 和管理员权限。
 
-MCP 服务位于 `mcp/`，使用官方 MCP TypeScript SDK，通过 stdio 向 AI 客户端提供上述能力。详见 `mcp/README.md`。
+安全快照位于 `backups/`，带 SHA256 校验，默认保留最近 50 份。RestoreRules 只恢复规则定义，不直接回放旧 Windows 路由，也不会盲目恢复旧 manager-state。
+
+MCP 已拆分：
+- `mcp-user/`：最终用户/日常 AI 网络管理；
+- `mcp-dev/`：开发、自检、构建和打包；
+- `mcp/`：旧版兼容入口。
+
+详见 `MCP_INDEX.md` 和 `../docs/SAFETY_BACKUP_RECOVERY.md`。
 
 ## 界面视觉规范
 
