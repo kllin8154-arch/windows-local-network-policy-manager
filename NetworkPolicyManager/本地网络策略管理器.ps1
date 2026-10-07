@@ -3,7 +3,7 @@ param(
     [switch]$SelfTest,
     [switch]$DumpStatus,
     [switch]$UiSmokeTest,
-    [ValidateSet('ListRules', 'ListGroups', 'PlanGroup', 'Discover', 'Audit', 'ExplainAddress', 'PlanRule', 'CreateBackup', 'ListBackups', 'RestoreRules', 'SaveRule', 'ApplyRule', 'RemoveRule', 'TestRule')]
+    [ValidateSet('ListRules', 'ListGroups', 'PlanGroup', 'Discover', 'Audit', 'Drift', 'PlanRepair', 'ExplainAddress', 'PlanRule', 'CreateBackup', 'ListBackups', 'RestoreRules', 'SaveRule', 'ApplyRule', 'RemoveRule', 'TestRule')]
     [string]$Command,
     [string]$RuleId,
     [string]$Address,
@@ -758,6 +758,214 @@ function Get-GroupPlan {
         SystemChangeCount = if ($plans.Count -eq 0) { 0 } else { [int](($plans | Measure-Object -Property SystemChangeCount -Sum).Sum) }
         WarningCount = @($plans | ForEach-Object { @($_.Warnings) }).Count
         Plans = @($plans)
+    }
+}
+
+function Get-StateDriftReport {
+    param([object]$Snapshot = $null)
+
+    $snapshot = if ($null -eq $Snapshot) { Get-SystemSnapshot } else { $Snapshot }
+    $items = [Collections.Generic.List[object]]::new()
+
+    foreach ($state in @($script:State)) {
+        $ruleMatches = @($script:Rules | Where-Object Id -eq ([string]$state.Id) | Select-Object -First 1)
+        if ($ruleMatches.Count -eq 0) {
+            $items.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'OrphanState'
+                RuleId = [string]$state.Id
+                RuleName = '[规则已不存在]'
+                Resource = 'ManagerState'
+                Repairable = $false
+                ManualOnly = $true
+                Message = 'manager-state 中仍有记录，但规则定义已经不存在。为避免误删外部资源，不自动清理。'
+            })
+            continue
+        }
+
+        $rule = $ruleMatches[0]
+        $statePrefix = ''
+        try { $statePrefix = ConvertTo-NormalizedPrefix -Value ([string]$state.Destination) } catch {
+            $statePrefix = [string]$state.Destination
+        }
+        $stateGateway = [string]$state.Gateway
+        $stateGuid = Get-NormalizedGuid -Value ([string]$state.AdapterGuid)
+        $adapterMatches = @($snapshot.Adapters | Where-Object Guid -eq $stateGuid | Select-Object -First 1)
+        $acceptableIndexes = @([int]$state.InterfaceIndex)
+        if ($adapterMatches.Count -gt 0) {
+            $acceptableIndexes += [int]$adapterMatches[0].Index
+        }
+        $acceptableIndexes = @($acceptableIndexes | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+
+        $ownedTupleRoutes = @($snapshot.Routes | Where-Object {
+            [string]$_.DestinationPrefix -eq $statePrefix -and
+            [string]$_.NextHop -eq $stateGateway -and
+            ($acceptableIndexes.Count -eq 0 -or [int]$_.InterfaceIndex -in $acceptableIndexes)
+        })
+        $samePrefixRoutes = @($snapshot.Routes | Where-Object {
+            [string]$_.DestinationPrefix -eq $statePrefix
+        })
+
+        if ([bool]$state.RouteOwned) {
+            if ($ownedTupleRoutes.Count -eq 0) {
+                $replacement = $samePrefixRoutes.Count -gt 0
+                $items.Add([pscustomobject]@{
+                    Severity = if ($replacement) { 'Error' } else { 'Warning' }
+                    Code = if ($replacement) { 'OwnedRouteReplacedExternally' } else { 'OwnedRouteMissing' }
+                    RuleId = [string]$rule.Id
+                    RuleName = [string]$rule.Name
+                    Resource = 'Route'
+                    Repairable = [bool]$rule.Enabled
+                    ManualOnly = -not [bool]$rule.Enabled
+                    Message = if ($replacement) {
+                        "本程序拥有的路由 $statePrefix -> $stateGateway 已不存在，但同前缀出现了其他路由；必须重新 Plan，不能直接覆盖。"
+                    } else {
+                        "本程序拥有的路由 $statePrefix -> $stateGateway 已从 Windows 中消失。"
+                    }
+                })
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($statePrefix) -and $ownedTupleRoutes.Count -eq 0) {
+            $items.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'ExternalRouteMissing'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Resource = 'Route'
+                Repairable = [bool]$rule.Enabled
+                ManualOnly = -not [bool]$rule.Enabled
+                Message = '该规则之前依赖一条不属于本程序的外部路由，但这条路由现在已经不存在。修复会重新 Plan，并可能创建新的受管路由。'
+            })
+        }
+
+        $desiredPrefix = ''
+        $desiredGateway = ''
+        $desiredGuid = Get-NormalizedGuid -Value ([string]$rule.AdapterGuid)
+        $desiredResolved = $false
+        try {
+            $desiredPrefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
+            $desiredAdapter = Resolve-Adapter -Rule $rule -Adapters $snapshot.Adapters
+            $desiredGateway = Get-RuleGateway -Rule $rule -Adapter $desiredAdapter -Routes $snapshot.Routes
+            $desiredGuid = [string]$desiredAdapter.Guid
+            $desiredResolved = $true
+        } catch { }
+
+        if ($desiredResolved -and (
+            $desiredPrefix -ne $statePrefix -or
+            $desiredGateway -ne $stateGateway -or
+            $desiredGuid -ne $stateGuid
+        )) {
+            $items.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'DesiredRouteChanged'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Resource = 'Route'
+                Repairable = [bool]$rule.Enabled
+                ManualOnly = -not [bool]$rule.Enabled
+                Message = "规则定义当前期望 $desiredPrefix -> $desiredGateway，但 manager-state 仍记录 $statePrefix -> $stateGateway。"
+            })
+        }
+
+        $stateProxy = [string]$state.ProxyToken
+        $stateProxyPresent = -not [string]::IsNullOrWhiteSpace($stateProxy) -and $stateProxy -in @($snapshot.ProxyTokens)
+        if ([bool]$state.ProxyOwned -and -not [string]::IsNullOrWhiteSpace($stateProxy) -and -not $stateProxyPresent) {
+            $items.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'OwnedProxyMissing'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Resource = 'ProxyBypass'
+                Repairable = [bool]$rule.Enabled
+                ManualOnly = -not [bool]$rule.Enabled
+                Message = "本程序拥有的代理绕过 token「$stateProxy」已从 ProxyOverride 中消失。"
+            })
+        } elseif (-not [bool]$state.ProxyOwned -and -not [string]::IsNullOrWhiteSpace($stateProxy) -and -not $stateProxyPresent) {
+            $items.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'ExternalProxyMissing'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Resource = 'ProxyBypass'
+                Repairable = [bool]$rule.Enabled
+                ManualOnly = -not [bool]$rule.Enabled
+                Message = "规则之前依赖外部代理绕过 token「$stateProxy」，但它现在已经不存在。"
+            })
+        }
+
+        $desiredProxy = ''
+        try { $desiredProxy = Get-ProxyTokenForRule -Rule $rule } catch { }
+        if ($desiredProxy -ne $stateProxy) {
+            $items.Add([pscustomobject]@{
+                Severity = 'Warning'
+                Code = 'DesiredProxyChanged'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Resource = 'ProxyBypass'
+                Repairable = [bool]$rule.Enabled
+                ManualOnly = -not [bool]$rule.Enabled
+                Message = "规则定义的代理绕过目标已变化：当前期望「$desiredProxy」，manager-state 记录「$stateProxy」。"
+            })
+        }
+    }
+
+    foreach ($rule in @($script:Rules)) {
+        $state = Get-StateEntry -Id ([string]$rule.Id)
+        if ($null -ne $state -or -not [bool]$rule.Enabled) { continue }
+        $status = Get-RuleStatus -Rule $rule -Snapshot $snapshot
+        if ([string]$status.State -eq 'Applied') {
+            $items.Add([pscustomobject]@{
+                Severity = 'Info'
+                Code = 'ExternalMatchWithoutState'
+                RuleId = [string]$rule.Id
+                RuleName = [string]$rule.Name
+                Resource = 'Route'
+                Repairable = $false
+                ManualOnly = $true
+                Message = '当前 Windows 路由与规则吻合，但没有 manager-state 所有权记录；视为外部匹配，不自动接管。'
+            })
+        }
+    }
+
+    $errors = @($items | Where-Object Severity -eq 'Error').Count
+    $warnings = @($items | Where-Object Severity -eq 'Warning').Count
+    $infos = @($items | Where-Object Severity -eq 'Info').Count
+
+    [pscustomobject]@{
+        GeneratedAt = (Get-Date).ToString('o')
+        Healthy = ($errors + $warnings) -eq 0
+        StateCount = @($script:State).Count
+        DriftCount = $errors + $warnings
+        Summary = [pscustomobject]@{
+            Error = $errors
+            Warning = $warnings
+            Info = $infos
+            ManualOnly = @($items | Where-Object ManualOnly).Count
+            Repairable = @($items | Where-Object Repairable).Count
+        }
+        Items = @($items)
+    }
+}
+
+function Get-RepairPlan {
+    param([Parameter(Mandatory)][string]$RuleId)
+
+    $rule = Get-RuleById -Id $RuleId
+    $drift = Get-StateDriftReport
+    $items = @($drift.Items | Where-Object RuleId -eq $RuleId)
+    $action = if ([bool]$rule.Enabled) { 'Apply' } else { 'Remove' }
+    $plan = Get-RulePlan -Rule $rule -Action $action
+
+    [pscustomobject]@{
+        GeneratedAt = (Get-Date).ToString('o')
+        RuleId = $RuleId
+        RuleName = [string]$rule.Name
+        Group = Get-RuleGroup -Rule $rule
+        HasDrift = @($items | Where-Object { $_.Severity -in @('Error','Warning') }).Count -gt 0
+        RecommendedAction = $action
+        Repairable = [bool]$plan.Allowed -and @($items | Where-Object Repairable).Count -gt 0
+        DriftItems = @($items)
+        Fingerprint = [string]$plan.Fingerprint
+        Plan = $plan
     }
 }
 
@@ -1996,6 +2204,15 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
         }
         'Audit' {
             Get-PolicyAudit | ConvertTo-Json -Depth 10
+            exit 0
+        }
+        'Drift' {
+            Get-StateDriftReport | ConvertTo-Json -Depth 12
+            exit 0
+        }
+        'PlanRepair' {
+            if ([string]::IsNullOrWhiteSpace($RuleId)) { throw 'PlanRepair 需要 -RuleId。' }
+            Get-RepairPlan -RuleId $RuleId | ConvertTo-Json -Depth 14
             exit 0
         }
         'ExplainAddress' {
