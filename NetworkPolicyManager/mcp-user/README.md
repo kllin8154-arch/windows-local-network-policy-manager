@@ -10,7 +10,7 @@
 
 任何真实网络修改固定按以下顺序：
 
-Discover → Audit → 必要时 ExplainAddress → PlanRule → 展示 Diff / Warnings → 用户明确确认 → Apply / Remove + 同一 Fingerprint → TestRule
+Discover → Audit → Drift → 必要时 ExplainAddress / PlanRepair → PlanRule → 展示 Diff / Warnings → 用户明确确认 → Apply / Remove + 同一 Fingerprint → TestRule
 
 如果网络状态在 Plan 后发生变化，Fingerprint 会失效，必须重新计划。
 
@@ -29,7 +29,9 @@ npm run start
 | Tool | 风险 | 说明 |
 | --- | --- | --- |
 | network_policy_discover | 只读 | 当前网卡、路由、代理、管理状态 |
-| network_policy_audit | 只读 | 重叠、网卡、网关、所有权风险 |
+| network_policy_audit | 只读 | 重叠、多默认出口、网卡、网关、所有权风险 |
+| network_policy_drift | 只读 | 对比规则、manager-state 和真实 Windows 路由/代理，分类状态漂移 |
+| network_policy_plan_repair | 只读 | 为指定漂移规则生成现有 Apply/Remove Diff 与 Fingerprint；不直接修复 |
 | network_policy_explain_address | 只读 | 输入 IPv4，解释最终 Windows 选路、候选路由、匹配规则与代理绕过 |
 | network_policy_list_rules | 只读 | 规则定义（含可选 Group / Tags） |
 | network_policy_list_groups | 只读 | 分组、规则数、启用数和标签汇总 |
@@ -104,3 +106,14 @@ network_policy_restore_rules 只恢复规则配置；恢复后会清除接管标
 4. 用户确认后，仍使用现有 network_policy_apply_rule 逐条提交每条规则自己的 Fingerprint
 
 USER MCP 刻意不提供一键 apply_group，避免一个高权限调用跨越多条规则的独立状态校验。
+
+
+## 多网络环境
+
+AI 不应根据网卡名称猜测“哪张是现场网线”。
+
+Discover 会返回 AdapterKind、VirtualProvider、InterfaceMetric，并列出全部默认路由及 EffectiveMetric。Wi-Fi、有线、Hyper-V、VMware、VirtualBox、Wintun/TAP/VPN 可以同时存在。
+
+On-Link（NextHop=0.0.0.0）虚拟网络只用于发现和解释，不能当普通 Gateway Route 自动接管。
+
+漂移修复仍使用现有 network_policy_apply_rule / network_policy_remove_rule；network_policy_plan_repair 本身是只读工具。
