@@ -1379,45 +1379,116 @@ function Invoke-ApplyRulePolicyCore {
     if ($adapter.Status -ne 'Up') {
         throw "网卡「$($adapter.Name)」当前未连接，请插好网线后再应用。"
     }
+
     $prefix = ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)
     $gateway = Get-RuleGateway -Rule $Rule -Adapter $adapter
     $previous = Get-StateEntry -Id ([string]$Rule.Id)
-    $exact = Get-ExactRoutes -Prefix $prefix
-    $matching = @($exact | Where-Object {
-        $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $gateway
-    })
-    $conflicts = @($exact | Where-Object {
-        $_.InterfaceIndex -ne $adapter.Index -or $_.NextHop -ne $gateway
-    })
 
-    $removedPrevious = $false
-    if ($conflicts.Count -gt 0) {
-        $canReplacePrevious = $null -ne $previous -and [bool]$previous.RouteOwned -and
-            @($conflicts | Where-Object NextHop -ne ([string]$previous.Gateway)).Count -eq 0
-        if (-not $canReplacePrevious) {
-            $details = ($conflicts | ForEach-Object { "$($_.InterfaceAlias) / $($_.NextHop)" }) -join ', '
-            throw "目标 $prefix 已有其他路由：$details。为避免覆盖，未做修改。"
+    $previousPrefix = ''
+    $previousGateway = ''
+    $previousAdapterGuid = ''
+    $samePreviousDesired = $false
+    if ($null -ne $previous) {
+        try { $previousPrefix = ConvertTo-NormalizedPrefix -Value ([string]$previous.Destination) } catch {
+            $previousPrefix = [string]$previous.Destination
         }
-        $previousAdapter = @($adapters | Where-Object Guid -eq (Get-NormalizedGuid -Value ([string]$previous.AdapterGuid))) |
-            Select-Object -First 1
-        $previousIndex = if ($null -ne $previousAdapter) { $previousAdapter.Index } else { [int]$previous.InterfaceIndex }
-        Remove-ExactRoute -Prefix ([string]$previous.Destination) -Gateway ([string]$previous.Gateway) `
-            -InterfaceIndex $previousIndex
-        $removedPrevious = $true
-        $matching = @()
+        $previousGateway = [string]$previous.Gateway
+        $previousAdapterGuid = Get-NormalizedGuid -Value ([string]$previous.AdapterGuid)
+        $samePreviousDesired =
+            [bool]$previous.RouteOwned -and
+            $previousPrefix -eq $prefix -and
+            $previousGateway -eq $gateway -and
+            $previousAdapterGuid -eq [string]$adapter.Guid
     }
 
+    $removedRoutes = [Collections.Generic.List[object]]::new()
     $routeCreated = $false
     $proxyAdded = $false
+    $oldProxyRemoved = $false
+    $oldProxyToken = ''
+
     try {
+        if ($null -ne $previous -and [bool]$previous.RouteOwned -and -not $samePreviousDesired) {
+            $previousRoutes = @(Get-ExactRoutes -Prefix $previousPrefix | Where-Object {
+                [string]$_.NextHop -eq $previousGateway
+            })
+            $storedIndex = [int]$previous.InterfaceIndex
+            $preferred = @($previousRoutes | Where-Object InterfaceIndex -eq $storedIndex | Select-Object -First 1)
+            $ownedRoute = if ($preferred.Count -gt 0) { $preferred[0] } else { $null }
+
+            if ($null -ne $ownedRoute) {
+                Remove-ExactRoute -Prefix $previousPrefix -Gateway $previousGateway -InterfaceIndex ([int]$ownedRoute.InterfaceIndex)
+                $removedRoutes.Add([pscustomobject]@{
+                    Destination = $previousPrefix
+                    Gateway = $previousGateway
+                    InterfaceIndex = [int]$ownedRoute.InterfaceIndex
+                })
+            }
+        }
+
+        $exact = Get-ExactRoutes -Prefix $prefix
+        $matching = @($exact | Where-Object {
+            $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $gateway
+        })
+        $conflicts = @($exact | Where-Object {
+            $_.InterfaceIndex -ne $adapter.Index -or $_.NextHop -ne $gateway
+        })
+
+        if ($conflicts.Count -gt 0) {
+            $ownedConflictIndexes = @()
+            if ($null -ne $previous -and [bool]$previous.RouteOwned -and $previousPrefix -eq $prefix) {
+                $ownedConflictIndexes += [int]$previous.InterfaceIndex
+            }
+            $ownedConflictIndexes = @($ownedConflictIndexes | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+
+            $foreignConflicts = @($conflicts | Where-Object {
+                $previousGateway -ne [string]$_.NextHop -or
+                $ownedConflictIndexes.Count -eq 0 -or
+                [int]$_.InterfaceIndex -notin $ownedConflictIndexes
+            })
+            if ($foreignConflicts.Count -gt 0) {
+                $details = ($foreignConflicts | ForEach-Object { "$($_.InterfaceAlias) / $($_.NextHop)" }) -join ', '
+                throw "目标 $prefix 已有其他路由：$details。为避免覆盖，未做修改。"
+            }
+
+            foreach ($conflict in $conflicts) {
+                Remove-ExactRoute -Prefix $prefix -Gateway ([string]$conflict.NextHop) -InterfaceIndex ([int]$conflict.InterfaceIndex)
+                $removedRoutes.Add([pscustomobject]@{
+                    Destination = $prefix
+                    Gateway = [string]$conflict.NextHop
+                    InterfaceIndex = [int]$conflict.InterfaceIndex
+                })
+            }
+            $matching = @()
+        }
+
         if ($matching.Count -eq 0) {
             Add-ExactRoute -Prefix $prefix -Gateway $gateway -InterfaceIndex $adapter.Index
             $routeCreated = $true
         }
 
-        $routeOwned = $routeCreated -or [bool]$Rule.OwnExistingRoute -or
-            ($null -ne $previous -and [bool]$previous.RouteOwned)
+        $routeOwned = $routeCreated -or [bool]$Rule.OwnExistingRoute -or $samePreviousDesired
+
         $proxyToken = Get-ProxyTokenForRule -Rule $Rule
+        $samePreviousProxy = $null -ne $previous -and [bool]$previous.ProxyOwned -and
+            [string]$previous.ProxyToken -eq $proxyToken -and
+            -not [string]::IsNullOrWhiteSpace($proxyToken)
+
+        if ($null -ne $previous -and [bool]$previous.ProxyOwned) {
+            $oldProxyToken = [string]$previous.ProxyToken
+            if (-not [string]::IsNullOrWhiteSpace($oldProxyToken) -and $oldProxyToken -ne $proxyToken) {
+                $otherRuleUsesOldProxy = @($script:Rules | Where-Object {
+                    $_.Id -ne $Rule.Id -and [bool]$_.BypassProxy -and
+                    $(try { (Get-ProxyTokenForRule -Rule $_) -eq $oldProxyToken } catch { $false })
+                }).Count -gt 0
+                $tokensBefore = @(Get-ProxyTokens)
+                if (-not $otherRuleUsesOldProxy -and $oldProxyToken -in $tokensBefore) {
+                    Set-ProxyTokens -Tokens @($tokensBefore | Where-Object { $_ -ne $oldProxyToken })
+                    $oldProxyRemoved = $true
+                }
+            }
+        }
+
         $proxyOwned = $false
         if (-not [string]::IsNullOrWhiteSpace($proxyToken)) {
             $tokens = @(Get-ProxyTokens)
@@ -1426,8 +1497,7 @@ function Invoke-ApplyRulePolicyCore {
                 $proxyAdded = $true
                 $proxyOwned = $true
             } else {
-                $proxyOwned = [bool]$Rule.OwnExistingProxy -or
-                    ($null -ne $previous -and [bool]$previous.ProxyOwned)
+                $proxyOwned = [bool]$Rule.OwnExistingProxy -or $samePreviousProxy
             }
         }
 
@@ -1451,6 +1521,7 @@ function Invoke-ApplyRulePolicyCore {
         if ($verified.Count -eq 0) {
             throw "应用后验证失败：$prefix"
         }
+
         Write-AppLog -Message "已应用：$($Rule.Name) | $prefix -> $($adapter.Name) / $gateway"
     } catch {
         if ($routeCreated) {
@@ -1459,10 +1530,23 @@ function Invoke-ApplyRulePolicyCore {
         if ($proxyAdded) {
             try { Set-ProxyTokens -Tokens @((Get-ProxyTokens) | Where-Object { $_ -ne $proxyToken }) } catch { }
         }
-        if ($removedPrevious -and $null -ne $previous) {
+        if ($oldProxyRemoved -and -not [string]::IsNullOrWhiteSpace($oldProxyToken)) {
             try {
-                Add-ExactRoute -Prefix ([string]$previous.Destination) -Gateway ([string]$previous.Gateway) `
-                    -InterfaceIndex ([int]$previous.InterfaceIndex)
+                $tokens = @(Get-ProxyTokens)
+                if ($oldProxyToken -notin $tokens) {
+                    Set-ProxyTokens -Tokens @($tokens + $oldProxyToken)
+                }
+            } catch { }
+        }
+        foreach ($removed in @($removedRoutes)) {
+            try {
+                $exists = @(Get-ExactRoutes -Prefix ([string]$removed.Destination) | Where-Object {
+                    $_.NextHop -eq [string]$removed.Gateway -and
+                    $_.InterfaceIndex -eq [int]$removed.InterfaceIndex
+                }).Count -gt 0
+                if (-not $exists) {
+                    Add-ExactRoute -Prefix ([string]$removed.Destination) -Gateway ([string]$removed.Gateway) -InterfaceIndex ([int]$removed.InterfaceIndex)
+                }
             } catch { }
         }
         throw
