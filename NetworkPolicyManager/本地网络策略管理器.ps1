@@ -3,10 +3,11 @@ param(
     [switch]$SelfTest,
     [switch]$DumpStatus,
     [switch]$UiSmokeTest,
-    [ValidateSet('ListRules', 'Discover', 'Audit', 'ExplainAddress', 'PlanRule', 'CreateBackup', 'ListBackups', 'RestoreRules', 'SaveRule', 'ApplyRule', 'RemoveRule', 'TestRule')]
+    [ValidateSet('ListRules', 'ListGroups', 'PlanGroup', 'Discover', 'Audit', 'ExplainAddress', 'PlanRule', 'CreateBackup', 'ListBackups', 'RestoreRules', 'SaveRule', 'ApplyRule', 'RemoveRule', 'TestRule')]
     [string]$Command,
     [string]$RuleId,
     [string]$Address,
+    [string]$Group,
     [string]$RuleJson,
     [ValidateSet('Apply', 'Remove')]
     [string]$Action = 'Apply',
@@ -301,6 +302,8 @@ function Restore-RulesFromSafetyBackup {
         [pscustomobject]@{
             Id = [string]$rule.Id
             Name = [string]$rule.Name
+            Group = Get-RuleGroup -Rule $rule
+            Tags = @(Get-RuleTags -Rule $rule)
             Destination = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
             AdapterGuid = Get-NormalizedGuid -Value ([string]$rule.AdapterGuid)
             AdapterDescription = [string]$rule.AdapterDescription
@@ -672,6 +675,90 @@ function Get-RuleById {
     $rule = @($script:Rules | Where-Object Id -eq $Id | Select-Object -First 1)
     if ($rule.Count -eq 0) { throw "找不到规则：$Id" }
     $rule[0]
+}
+
+function Get-RuleGroup {
+    param([Parameter(Mandatory)]$Rule)
+
+    if ($Rule.PSObject.Properties.Name -contains 'Group') {
+        return ([string]$Rule.Group).Trim()
+    }
+    ''
+}
+
+function ConvertTo-NormalizedTags {
+    param($Value)
+
+    $items = [Collections.Generic.List[string]]::new()
+    foreach ($raw in @($Value)) {
+        if ($null -eq $raw) { continue }
+        foreach ($part in ([string]$raw -split '[,，;；]')) {
+            $tag = $part.Trim()
+            if ([string]::IsNullOrWhiteSpace($tag)) { continue }
+            if ($tag.Length -gt 40) { throw "标签过长：$tag" }
+            if ($tag -notin @($items)) { $items.Add($tag) }
+        }
+    }
+    @($items)
+}
+
+function Get-RuleTags {
+    param([Parameter(Mandatory)]$Rule)
+
+    if ($Rule.PSObject.Properties.Name -contains 'Tags') {
+        return @(ConvertTo-NormalizedTags -Value $Rule.Tags)
+    }
+    @()
+}
+
+function Get-RuleGroupDisplay {
+    param([Parameter(Mandatory)]$Rule)
+    $group = Get-RuleGroup -Rule $Rule
+    if ([string]::IsNullOrWhiteSpace($group)) { return '未分组' }
+    $group
+}
+
+function Get-GroupSummaries {
+    $groups = @($script:Rules | ForEach-Object { Get-RuleGroup -Rule $_ } | Sort-Object -Unique)
+    foreach ($groupName in $groups) {
+        $rules = @($script:Rules | Where-Object { (Get-RuleGroup -Rule $_) -eq $groupName })
+        [pscustomobject]@{
+            Group = $groupName
+            DisplayName = if ([string]::IsNullOrWhiteSpace($groupName)) { '未分组' } else { $groupName }
+            RuleCount = $rules.Count
+            EnabledCount = @($rules | Where-Object { [bool]$_.Enabled }).Count
+            Tags = @($rules | ForEach-Object { Get-RuleTags -Rule $_ } | Sort-Object -Unique)
+        }
+    }
+}
+
+function Get-GroupPlan {
+    param(
+        [AllowEmptyString()][string]$GroupName,
+        [ValidateSet('Apply', 'Remove')][string]$Action = 'Apply'
+    )
+
+    $rules = @($script:Rules | Where-Object {
+        (Get-RuleGroup -Rule $_) -eq $GroupName -and
+        ($Action -ne 'Apply' -or [bool]$_.Enabled)
+    })
+
+    $plans = [Collections.Generic.List[object]]::new()
+    foreach ($rule in $rules) {
+        $plans.Add((Get-RulePlan -Rule $rule -Action $Action))
+    }
+
+    [pscustomobject]@{
+        GeneratedAt = (Get-Date).ToString('o')
+        Group = $GroupName
+        DisplayName = if ([string]::IsNullOrWhiteSpace($GroupName)) { '未分组' } else { $GroupName }
+        Action = $Action
+        RuleCount = $rules.Count
+        Allowed = @($plans | Where-Object { -not [bool]$_.Allowed }).Count -eq 0
+        SystemChangeCount = if ($plans.Count -eq 0) { 0 } else { [int](($plans | Measure-Object -Property SystemChangeCount -Sum).Sum) }
+        WarningCount = @($plans | ForEach-Object { @($_.Warnings) }).Count
+        Plans = @($plans)
+    }
 }
 
 function ConvertTo-IPv4UInt64 {
@@ -1422,6 +1509,7 @@ function Get-RulePlan {
         Action = $Action
         RuleId = [string]$Rule.Id
         RuleName = [string]$Rule.Name
+        Group = Get-RuleGroup -Rule $Rule
         Destination = $prefix
         Allowed = $errors.Count -eq 0
         Fingerprint = $fingerprint
@@ -1843,6 +1931,9 @@ function Assert-Configuration {
         if ($ids.ContainsKey([string]$rule.Id)) { throw "规则 Id 重复：$($rule.Id)" }
         $ids[[string]$rule.Id] = $true
         if ([string]::IsNullOrWhiteSpace([string]$rule.Name)) { throw "规则 $($rule.Id) 缺少名称。" }
+        $groupName = Get-RuleGroup -Rule $rule
+        if ($groupName.Length -gt 60) { throw "规则「$($rule.Name)」的分组名称超过 60 个字符。" }
+        [void](Get-RuleTags -Rule $rule)
         $prefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
         if ($prefix -eq '0.0.0.0/0') {
             throw "规则「$($rule.Name)」试图管理默认路由 0.0.0.0/0；该目标受保护。"
@@ -1888,7 +1979,15 @@ Assert-Configuration
 if (-not [string]::IsNullOrWhiteSpace($Command)) {
     switch ($Command) {
         'ListRules' {
-            @($script:Rules) | ConvertTo-Json -Depth 8
+            ConvertTo-Json -InputObject @($script:Rules) -Depth 8
+            exit 0
+        }
+        'ListGroups' {
+            ConvertTo-Json -InputObject @(Get-GroupSummaries) -Depth 8
+            exit 0
+        }
+        'PlanGroup' {
+            Get-GroupPlan -GroupName $Group -Action $Action | ConvertTo-Json -Depth 12
             exit 0
         }
         'Discover' {
@@ -1914,7 +2013,7 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
             exit 0
         }
         'ListBackups' {
-            @(Get-SafetyBackupList) | ConvertTo-Json -Depth 6
+            ConvertTo-Json -InputObject @(Get-SafetyBackupList) -Depth 6
             exit 0
         }
         'RestoreRules' {
@@ -1935,6 +2034,8 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
             $rule = [pscustomobject]@{
                 Id = $id
                 Name = [string]$incoming.Name
+                Group = if ($incoming.PSObject.Properties.Name -contains 'Group') { ([string]$incoming.Group).Trim() } else { '' }
+                Tags = if ($incoming.PSObject.Properties.Name -contains 'Tags') { @(ConvertTo-NormalizedTags -Value $incoming.Tags) } else { @() }
                 Destination = ConvertTo-NormalizedPrefix -Value ([string]$incoming.Destination)
                 AdapterGuid = Get-NormalizedGuid -Value ([string]$incoming.AdapterGuid)
                 AdapterDescription = [string]$incoming.AdapterDescription
@@ -2110,7 +2211,7 @@ function Show-RuleEditor {
     $isEdit = $null -ne $Rule
     $dialog = [Windows.Forms.Form]::new()
     $dialog.Text = if ($isEdit) { '修改通信规则' } else { '新增通信规则' }
-    $dialog.ClientSize = [Drawing.Size]::new(620, 430)
+    $dialog.ClientSize = [Drawing.Size]::new(660, 535)
     $dialog.FormBorderStyle = 'FixedDialog'
     $dialog.StartPosition = 'CenterParent'
     $dialog.MaximizeBox = $false
@@ -2120,32 +2221,52 @@ function Show-RuleEditor {
     $dialog.BackColor = $script:Theme.Background
     $dialog.ForeColor = $script:Theme.WarmText
 
-    $labels = @('规则名称', '目标 IPv4 / CIDR', '指定网卡', '网关模式', '手动网关')
-    for ($i = 0; $i -lt $labels.Count; $i++) {
+    $labels = @(
+        @('规则名称', 28),
+        @('分组', 82),
+        @('标签', 136),
+        @('目标 IPv4 / CIDR', 190),
+        @('指定网卡', 244),
+        @('网关模式', 298),
+        @('手动网关', 352)
+    )
+    foreach ($spec in $labels) {
         $label = [Windows.Forms.Label]::new()
-        $label.Text = $labels[$i]
+        $label.Text = [string]$spec[0]
         $label.AutoSize = $true
         $label.ForeColor = $script:Theme.Accent
         $label.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
-        $label.Location = [Drawing.Point]::new(28, 32 + ($i * 58))
+        $label.Location = [Drawing.Point]::new(28, [int]$spec[1])
         $dialog.Controls.Add($label)
     }
 
     $nameBox = [Windows.Forms.TextBox]::new()
-    $nameBox.Location = [Drawing.Point]::new(170, 28)
-    $nameBox.Size = [Drawing.Size]::new(410, 26)
+    $nameBox.Location = [Drawing.Point]::new(170, 24)
+    $nameBox.Size = [Drawing.Size]::new(450, 26)
     Set-UiInputTheme -Control $nameBox
     $dialog.Controls.Add($nameBox)
 
+    $groupBox = [Windows.Forms.TextBox]::new()
+    $groupBox.Location = [Drawing.Point]::new(170, 78)
+    $groupBox.Size = [Drawing.Size]::new(450, 26)
+    Set-UiInputTheme -Control $groupBox
+    $dialog.Controls.Add($groupBox)
+
+    $tagsBox = [Windows.Forms.TextBox]::new()
+    $tagsBox.Location = [Drawing.Point]::new(170, 132)
+    $tagsBox.Size = [Drawing.Size]::new(450, 26)
+    Set-UiInputTheme -Control $tagsBox
+    $dialog.Controls.Add($tagsBox)
+
     $destinationBox = [Windows.Forms.TextBox]::new()
-    $destinationBox.Location = [Drawing.Point]::new(170, 86)
-    $destinationBox.Size = [Drawing.Size]::new(410, 26)
+    $destinationBox.Location = [Drawing.Point]::new(170, 186)
+    $destinationBox.Size = [Drawing.Size]::new(450, 26)
     Set-UiInputTheme -Control $destinationBox
     $dialog.Controls.Add($destinationBox)
 
     $adapterBox = [Windows.Forms.ComboBox]::new()
-    $adapterBox.Location = [Drawing.Point]::new(170, 144)
-    $adapterBox.Size = [Drawing.Size]::new(410, 28)
+    $adapterBox.Location = [Drawing.Point]::new(170, 240)
+    $adapterBox.Size = [Drawing.Size]::new(450, 28)
     $adapterBox.DropDownStyle = 'DropDownList'
     $adapterBox.DisplayMember = 'Display'
     Set-UiInputTheme -Control $adapterBox
@@ -2154,8 +2275,8 @@ function Show-RuleEditor {
     $dialog.Controls.Add($adapterBox)
 
     $gatewayModeBox = [Windows.Forms.ComboBox]::new()
-    $gatewayModeBox.Location = [Drawing.Point]::new(170, 202)
-    $gatewayModeBox.Size = [Drawing.Size]::new(410, 28)
+    $gatewayModeBox.Location = [Drawing.Point]::new(170, 294)
+    $gatewayModeBox.Size = [Drawing.Size]::new(450, 28)
     $gatewayModeBox.DropDownStyle = 'DropDownList'
     Set-UiInputTheme -Control $gatewayModeBox
     [void]$gatewayModeBox.Items.Add('自动使用该网卡当前默认网关')
@@ -2163,8 +2284,8 @@ function Show-RuleEditor {
     $dialog.Controls.Add($gatewayModeBox)
 
     $gatewayBox = [Windows.Forms.TextBox]::new()
-    $gatewayBox.Location = [Drawing.Point]::new(170, 260)
-    $gatewayBox.Size = [Drawing.Size]::new(410, 26)
+    $gatewayBox.Location = [Drawing.Point]::new(170, 348)
+    $gatewayBox.Size = [Drawing.Size]::new(450, 26)
     Set-UiInputTheme -Control $gatewayBox
     $dialog.Controls.Add($gatewayBox)
 
@@ -2172,23 +2293,30 @@ function Show-RuleEditor {
     $bypassCheck.Text = '同时绕过 Windows 系统代理（仅单个 IPv4）'
     $bypassCheck.AutoSize = $true
     $bypassCheck.ForeColor = $script:Theme.MutedText
-    $bypassCheck.Location = [Drawing.Point]::new(170, 312)
+    $bypassCheck.Location = [Drawing.Point]::new(170, 398)
     $dialog.Controls.Add($bypassCheck)
 
     $enabledCheck = [Windows.Forms.CheckBox]::new()
     $enabledCheck.Text = '启用此规则'
     $enabledCheck.AutoSize = $true
     $enabledCheck.ForeColor = $script:Theme.MutedText
-    $enabledCheck.Location = [Drawing.Point]::new(170, 344)
+    $enabledCheck.Location = [Drawing.Point]::new(170, 430)
     $enabledCheck.Checked = $true
     $dialog.Controls.Add($enabledCheck)
 
+    $hint = [Windows.Forms.Label]::new()
+    $hint.Text = '分组用于组织和批量计划；标签用于搜索。它们不会改变路由所有权。'
+    $hint.AutoSize = $true
+    $hint.ForeColor = $script:Theme.MutedText
+    $hint.Location = [Drawing.Point]::new(170, 461)
+    $dialog.Controls.Add($hint)
+
     $saveButton = New-UiButton -Text '保存' -Width 92 -Variant 'Primary'
-    $saveButton.Location = [Drawing.Point]::new(386, 382)
+    $saveButton.Location = [Drawing.Point]::new(426, 492)
     $dialog.Controls.Add($saveButton)
 
     $cancelButton = New-UiButton -Text '取消' -Width 92
-    $cancelButton.Location = [Drawing.Point]::new(488, 382)
+    $cancelButton.Location = [Drawing.Point]::new(528, 492)
     $cancelButton.DialogResult = 'Cancel'
     $dialog.CancelButton = $cancelButton
     $dialog.Controls.Add($cancelButton)
@@ -2199,6 +2327,8 @@ function Show-RuleEditor {
 
     if ($isEdit) {
         $nameBox.Text = [string]$Rule.Name
+        $groupBox.Text = Get-RuleGroup -Rule $Rule
+        $tagsBox.Text = (@(Get-RuleTags -Rule $Rule) -join ', ')
         $destinationBox.Text = [string]$Rule.Destination
         $ruleGuid = Get-NormalizedGuid -Value ([string]$Rule.AdapterGuid)
         for ($i = 0; $i -lt $adapterBox.Items.Count; $i++) {
@@ -2224,6 +2354,9 @@ function Show-RuleEditor {
     $saveButton.Add_Click({
         try {
             if ([string]::IsNullOrWhiteSpace($nameBox.Text)) { throw '请输入规则名称。' }
+            $group = $groupBox.Text.Trim()
+            if ($group.Length -gt 60) { throw '分组名称不能超过 60 个字符。' }
+            $tags = @(ConvertTo-NormalizedTags -Value $tagsBox.Text)
             $prefix = ConvertTo-NormalizedPrefix -Value $destinationBox.Text
             if ($null -eq $adapterBox.SelectedItem) { throw '请选择网卡。' }
             $adapter = $adapterBox.SelectedItem
@@ -2235,13 +2368,17 @@ function Show-RuleEditor {
             if ($bypassCheck.Checked -and -not $prefix.EndsWith('/32')) {
                 throw '系统代理绕过仅支持单个 IPv4（/32）。'
             }
+
             $sameManagedIdentity = $isEdit -and
                 (ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)) -eq $prefix -and
                 (Get-NormalizedGuid -Value ([string]$Rule.AdapterGuid)) -eq $adapter.Guid -and
                 [string]$Rule.GatewayMode -eq $mode -and [string]$Rule.Gateway -eq $gateway
+
             $dialog.Tag = [pscustomobject]@{
                 Id = if ($isEdit) { [string]$Rule.Id } else { [Guid]::NewGuid().ToString('N') }
                 Name = $nameBox.Text.Trim()
+                Group = $group
+                Tags = @($tags)
                 Destination = $prefix
                 AdapterGuid = [string]$adapter.Guid
                 AdapterDescription = [string]$adapter.Description
@@ -2258,7 +2395,6 @@ function Show-RuleEditor {
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, '无法保存', 'OK', 'Warning') | Out-Null
         }
     })
-
 
     if ($dialog.ShowDialog() -eq 'OK') { return $dialog.Tag }
     $null
@@ -2561,6 +2697,8 @@ function Show-DiscoveryDialog {
                 $newRule = [pscustomobject]@{
                     Id = [Guid]::NewGuid().ToString('N')
                     Name = "识别导入 - $prefix"
+                    Group = '系统识别'
+                    Tags = @('自动识别')
                     Destination = $prefix
                     AdapterGuid = [string]$adapter[0].Guid
                     AdapterDescription = [string]$adapter[0].Description
@@ -3231,7 +3369,7 @@ $searchLabel.Margin = [Windows.Forms.Padding]::new(16, 14, 4, 0)
 $toolbar.Controls.Add($searchLabel)
 
 $searchBox = [Windows.Forms.TextBox]::new()
-$searchBox.Width = 200
+$searchBox.Width = 160
 $searchBox.Height = 26
 $searchBox.Margin = [Windows.Forms.Padding]::new(4, 10, 4, 0)
 Set-UiInputTheme -Control $searchBox
@@ -3247,6 +3385,14 @@ Set-UiInputTheme -Control $filterBox
 }
 $filterBox.SelectedIndex = 0
 $toolbar.Controls.Add($filterBox)
+
+$groupFilterBox = [Windows.Forms.ComboBox]::new()
+$groupFilterBox.Width = 128
+$groupFilterBox.DropDownStyle = 'DropDownList'
+$groupFilterBox.DisplayMember = 'Display'
+$groupFilterBox.Margin = [Windows.Forms.Padding]::new(8, 10, 4, 0)
+Set-UiInputTheme -Control $groupFilterBox
+$toolbar.Controls.Add($groupFilterBox)
 
 $grid = [Windows.Forms.DataGridView]::new()
 $grid.Dock = 'Fill'
@@ -3273,7 +3419,8 @@ function Add-GridColumn {
 }
 
 Add-GridColumn -Name 'Enabled' -Header '启用' -Width 52
-Add-GridColumn -Name 'Name' -Header '规则' -Width 220
+Add-GridColumn -Name 'Name' -Header '规则' -Width 190
+Add-GridColumn -Name 'Group' -Header '分组' -Width 105
 Add-GridColumn -Name 'Destination' -Header '目标 IPv4 / CIDR' -Width 145
 Add-GridColumn -Name 'Adapter' -Header '指定网卡' -Width 145
 Add-GridColumn -Name 'Gateway' -Header '网关' -Width 135
@@ -3538,7 +3685,13 @@ function Update-RuleDetail {
         [string]$status.Actual
     } else { '—' }
 
+    $groupText = Get-RuleGroupDisplay -Rule $rule
+    $tagsText = @(Get-RuleTags -Rule $rule) -join ', '
+    if ([string]::IsNullOrWhiteSpace($tagsText)) { $tagsText = '—' }
+
     $detailBox.Text = @(
+        "分组        $groupText",
+        "标签        $tagsText",
         "目标        $($rule.Destination)",
         "指定网卡    $adapterText",
         "网关模式    $($rule.GatewayMode)",
@@ -3555,6 +3708,41 @@ function Update-RuleDetail {
     Set-SelectedActionState -HasSelection $true
 }
 
+function Get-SelectedGroupFilterKey {
+    if ($null -eq $groupFilterBox.SelectedItem) { return '*' }
+    if ($groupFilterBox.SelectedItem.PSObject.Properties.Name -contains 'Key') {
+        return [string]$groupFilterBox.SelectedItem.Key
+    }
+    '*'
+}
+
+function Refresh-GroupFilterOptions {
+    $selectedKey = Get-SelectedGroupFilterKey
+    $groupFilterBox.BeginUpdate()
+    try {
+        $groupFilterBox.Items.Clear()
+        [void]$groupFilterBox.Items.Add([pscustomobject]@{ Key = '*'; Display = '全部分组' })
+        [void]$groupFilterBox.Items.Add([pscustomobject]@{ Key = ''; Display = '未分组' })
+        foreach ($summary in @(Get-GroupSummaries | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Group) })) {
+            [void]$groupFilterBox.Items.Add([pscustomobject]@{
+                Key = [string]$summary.Group
+                Display = "$($summary.DisplayName) ($($summary.RuleCount))"
+            })
+        }
+
+        $target = 0
+        for ($i = 0; $i -lt $groupFilterBox.Items.Count; $i++) {
+            if ([string]$groupFilterBox.Items[$i].Key -eq $selectedKey) {
+                $target = $i
+                break
+            }
+        }
+        $groupFilterBox.SelectedIndex = $target
+    } finally {
+        $groupFilterBox.EndUpdate()
+    }
+}
+
 function Test-ItemMatchesFilter {
     param([Parameter(Mandatory)]$Item)
 
@@ -3562,6 +3750,8 @@ function Test-ItemMatchesFilter {
     if (-not [string]::IsNullOrWhiteSpace($query)) {
         $haystack = @(
             [string]$Item.Rule.Name,
+            (Get-RuleGroup -Rule $Item.Rule),
+            (@(Get-RuleTags -Rule $Item.Rule) -join ' '),
             [string]$Item.Rule.Destination,
             [string]$Item.AdapterName,
             [string]$Item.GatewayText,
@@ -3571,6 +3761,11 @@ function Test-ItemMatchesFilter {
         if ($haystack.IndexOf($query, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
             return $false
         }
+    }
+
+    $selectedGroup = Get-SelectedGroupFilterKey
+    if ($selectedGroup -ne '*' -and (Get-RuleGroup -Rule $Item.Rule) -ne $selectedGroup) {
+        return $false
     }
 
     switch ([string]$filterBox.SelectedItem) {
@@ -3597,6 +3792,7 @@ function Render-RuleGrid {
             $rowIndex = $grid.Rows.Add(
                 $(if ([bool]$rule.Enabled) { '是' } else { '否' }),
                 [string]$rule.Name,
+                (Get-RuleGroupDisplay -Rule $rule),
                 [string]$rule.Destination,
                 [string]$item.AdapterName,
                 [string]$item.GatewayText,
@@ -3686,6 +3882,7 @@ function Refresh-Grid {
             '已自动识别当前网络' + [Environment]::NewLine + '当前没有待处理的现有策略'
         }
         $lastRefreshLabel.Text = "最后刷新 $(Get-Date -Format 'HH:mm:ss')"
+        Refresh-GroupFilterOptions
         Render-RuleGrid
     } catch {
         Write-AppLog -Message ("刷新失败：" + $_.Exception.Message) -Level 'ERROR'
@@ -3740,6 +3937,8 @@ function Restore-RulesFromFile {
         [pscustomobject]@{
             Id = if ([string]::IsNullOrWhiteSpace([string]$rule.Id)) { [Guid]::NewGuid().ToString('N') } else { [string]$rule.Id }
             Name = [string]$rule.Name
+            Group = Get-RuleGroup -Rule $rule
+            Tags = @(Get-RuleTags -Rule $rule)
             Destination = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
             AdapterGuid = Get-NormalizedGuid -Value ([string]$rule.AdapterGuid)
             AdapterDescription = [string]$rule.AdapterDescription
@@ -3842,6 +4041,11 @@ $grid.Add_SelectionChanged({ Update-RuleDetail })
 
 $searchBox.Add_TextChanged({ Render-RuleGrid })
 $filterBox.Add_SelectedIndexChanged({ Render-RuleGrid })
+$groupFilterBox.Add_SelectedIndexChanged({
+    $key = Get-SelectedGroupFilterKey
+    $applyAllButton.Text = if ($key -eq '*') { '应用全部' } else { '应用分组' }
+    Render-RuleGrid
+})
 
 $explainButton.Add_Click({
     $initial = ''
@@ -3950,22 +4154,44 @@ $applyButton.Add_Click({
 })
 
 $applyAllButton.Add_Click({
-    $enabledRules = @($script:Rules | Where-Object Enabled)
-    if ($enabledRules.Count -eq 0) { return }
-
+    $selectedGroup = Get-SelectedGroupFilterKey
     $planned = [Collections.Generic.List[object]]::new()
     $blocked = [Collections.Generic.List[string]]::new()
     $summary = [Collections.Generic.List[string]]::new()
-    $summary.Add("将检查并应用 $($enabledRules.Count) 条启用规则：")
-    $summary.Add('')
 
-    foreach ($rule in $enabledRules) {
-        $plan = Get-RulePlan -Rule $rule -Action 'Apply'
-        $planned.Add([pscustomobject]@{ Rule = $rule; Plan = $plan })
-        if (-not [bool]$plan.Allowed) {
-            $blocked.Add("$($rule.Name)：$(@($plan.Errors) -join '；')")
+    if ($selectedGroup -eq '*') {
+        $enabledRules = @($script:Rules | Where-Object Enabled)
+        if ($enabledRules.Count -eq 0) { return }
+
+        $summary.Add("将检查并应用 $($enabledRules.Count) 条启用规则：")
+        $summary.Add('')
+        foreach ($rule in $enabledRules) {
+            $plan = Get-RulePlan -Rule $rule -Action 'Apply'
+            $planned.Add([pscustomobject]@{ Rule = $rule; Plan = $plan })
+            if (-not [bool]$plan.Allowed) {
+                $blocked.Add("$($rule.Name)：$(@($plan.Errors) -join '；')")
+            }
+            $summary.Add("• $($rule.Name)  系统变更=$($plan.SystemChangeCount)  警告=$(@($plan.Warnings).Count)")
         }
-        $summary.Add("• $($rule.Name)  系统变更=$($plan.SystemChangeCount)  警告=$(@($plan.Warnings).Count)")
+    } else {
+        $groupPlan = Get-GroupPlan -GroupName $selectedGroup -Action 'Apply'
+        if ([int]$groupPlan.RuleCount -eq 0) {
+            [Windows.Forms.MessageBox]::Show(
+                "分组「$($groupPlan.DisplayName)」没有启用规则。",
+                '无需应用', 'OK', 'Information') | Out-Null
+            return
+        }
+
+        $summary.Add("分组「$($groupPlan.DisplayName)」：$($groupPlan.RuleCount) 条启用规则，预计系统变更 $($groupPlan.SystemChangeCount) 项。")
+        $summary.Add('')
+        foreach ($plan in @($groupPlan.Plans)) {
+            $rule = Get-RuleById -Id ([string]$plan.RuleId)
+            $planned.Add([pscustomobject]@{ Rule = $rule; Plan = $plan })
+            if (-not [bool]$plan.Allowed) {
+                $blocked.Add("$($rule.Name)：$(@($plan.Errors) -join '；')")
+            }
+            $summary.Add("• $($rule.Name)  系统变更=$($plan.SystemChangeCount)  警告=$(@($plan.Warnings).Count)")
+        }
     }
 
     if ($blocked.Count -gt 0) {
@@ -3973,15 +4199,16 @@ $applyAllButton.Add_Click({
             "批量计划存在被阻止的规则，不执行任何修改。" +
             [Environment]::NewLine + [Environment]::NewLine +
             ($blocked -join [Environment]::NewLine),
-            '应用全部被阻止', 'OK', 'Error') | Out-Null
+            '批量应用被阻止', 'OK', 'Error') | Out-Null
         return
     }
 
     $summary.Add('')
-    $summary.Add('每条规则执行前都会再次校验各自的计划指纹；任一规则失效后将停止后续批量操作。')
+    $summary.Add('每条规则执行前都会再次校验各自的计划指纹；任一计划失效或执行失败后立即停止。')
     $answer = [Windows.Forms.MessageBox]::Show(
         $summary -join [Environment]::NewLine,
-        '确认批量应用计划', 'YesNo', 'Warning')
+        $(if ($selectedGroup -eq '*') { '确认应用全部计划' } else { '确认应用分组计划' }),
+        'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
 
     $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
@@ -4010,8 +4237,9 @@ $applyAllButton.Add_Click({
             ($errors -join [Environment]::NewLine),
             '批量应用已停止', 'OK', 'Warning') | Out-Null
     } else {
+        $scopeText = if ($selectedGroup -eq '*') { '全部启用规则' } else { "分组「$(if ([string]::IsNullOrWhiteSpace($selectedGroup)) { '未分组' } else { $selectedGroup })」" }
         [Windows.Forms.MessageBox]::Show(
-            "已成功应用 $success 条规则。",
+            "$scopeText 已成功应用 $success 条规则。",
             '应用完成', 'OK', 'Information') | Out-Null
     }
 })
@@ -4106,7 +4334,8 @@ $script:RefreshTimer.Start()
 $toolTip = [Windows.Forms.ToolTip]::new()
 $toolTip.SetToolTip($discoverButton, '重新扫描当前 Windows 网卡、路由和代理绕过（Ctrl+D）')
 $toolTip.SetToolTip($refreshButton, '刷新规则实际状态（F5）')
-$toolTip.SetToolTip($searchBox, '按规则名称、目标地址、网卡、网关或状态搜索（Ctrl+F）')
+$toolTip.SetToolTip($searchBox, '按名称、分组、标签、目标、网卡、网关或状态搜索（Ctrl+F）')
+$toolTip.SetToolTip($groupFilterBox, '按规则分组筛选；筛选分组后“应用全部”会变为“应用分组”')
 $toolTip.SetToolTip($backupButton, '导出规则定义备份，不包含系统路由状态')
 $toolTip.SetToolTip($restoreButton, '导入规则备份；不会立即修改 Windows 网络')
 $toolTip.SetToolTip($applyButton, '先生成变更 Diff，再确认应用到 Windows')
