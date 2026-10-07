@@ -776,7 +776,6 @@ function Get-NetworkPolicyDiscovery {
 
     $specificRoutes = @($snapshot.Routes | Where-Object {
         $_.DestinationPrefix -ne '0.0.0.0/0' -and
-        $_.NextHop -ne '0.0.0.0' -and
         $_.DestinationPrefix -notlike '224.*' -and
         $_.DestinationPrefix -notlike '255.*'
     } | Sort-Object DestinationPrefix, InterfaceIndex, RouteMetric | ForEach-Object {
@@ -807,6 +806,8 @@ function Get-NetworkPolicyDiscovery {
             IsVirtual = $null -ne $routeAdapter -and [bool]$routeAdapter.IsVirtual
             VirtualProvider = if ($null -eq $routeAdapter) { '' } else { [string]$routeAdapter.VirtualProvider }
             Gateway = [string]$route.NextHop
+            RouteType = if ([string]$route.NextHop -eq '0.0.0.0') { 'OnLink' } else { 'Gateway' }
+            Actionable = [string]$route.NextHop -ne '0.0.0.0'
             RouteMetric = $routeMetric
             InterfaceMetric = $interfaceMetric
             EffectiveMetric = $routeMetric + $interfaceMetric
@@ -840,7 +841,9 @@ function Get-NetworkPolicyDiscovery {
         PreferredDefaultRoute = if (@($defaultRoutes).Count -gt 0) { $defaultRoutes[0] } else { $null }
         SpecificRoutes = @($specificRoutes)
         ProxyBypass = @($proxyRows)
-        UnmanagedSpecificRouteCount = @($specificRoutes | Where-Object { -not $_.Managed }).Count
+        OnLinkRouteCount = @($specificRoutes | Where-Object RouteType -eq 'OnLink').Count
+        UnmanagedSpecificRouteCount = @($specificRoutes | Where-Object { $_.Actionable -and -not $_.Managed }).Count
+        UnmanagedObservedRouteCount = @($specificRoutes | Where-Object { -not $_.Actionable -and -not $_.Managed }).Count
         UnmanagedProxyBypassCount = @($proxyRows | Where-Object { $_.Actionable -and -not $_.Managed }).Count
     }
 }
@@ -2872,7 +2875,7 @@ function Show-DiscoveryDialog {
     } else {
         "检测到 $($discovery.DefaultRouteCount) 个默认出口。"
     }
-    $heroText.Text = "识别到 $($discovery.Adapters.Count) 张网卡 · $($discovery.SpecificRoutes.Count) 条特定路由；未管理 $($discovery.UnmanagedSpecificRouteCount) 条。$defaultHint 自动识别仅查看，接管已有策略必须由你确认。"
+    $heroText.Text = "识别到 $($discovery.Adapters.Count) 张网卡 · $($discovery.SpecificRoutes.Count) 条特定路由（含 $($discovery.OnLinkRouteCount) 条 On-Link）；可导入未管理网关路由 $($discovery.UnmanagedSpecificRouteCount) 条。$defaultHint On-Link 仅观察，不会作为普通网关规则接管。"
     $heroText.ForeColor = $script:Theme.MutedText
     $heroText.AutoSize = $true
     $heroText.MaximumSize = [Drawing.Size]::new(1020, 0)
@@ -2996,12 +2999,13 @@ function Show-DiscoveryDialog {
 
     foreach ($spec in @(
         @('Managed','管理状态',95),
-        @('Destination','目标 IPv4 / CIDR',160),
-        @('Adapter','实际网卡',165),
-        @('Kind','类型',100),
-        @('Gateway','下一跳',135),
-        @('Metric','有效 Metric',82),
-        @('RuleName','匹配规则',230)
+        @('Destination','目标 IPv4 / CIDR',150),
+        @('Adapter','实际网卡',150),
+        @('Kind','网卡类型',95),
+        @('RouteType','路由类型',78),
+        @('Gateway','下一跳',125),
+        @('Metric','有效 Metric',78),
+        @('RuleName','匹配规则',210)
     )) {
         $column = [Windows.Forms.DataGridViewTextBoxColumn]::new()
         $column.Name = $spec[0]
@@ -3020,7 +3024,8 @@ function Show-DiscoveryDialog {
             [string]$route.Destination,
             [string]$route.InterfaceAlias,
             $(if ([string]::IsNullOrWhiteSpace([string]$route.VirtualProvider)) { [string]$route.AdapterKind } else { "$($route.AdapterKind) / $($route.VirtualProvider)" }),
-            [string]$route.Gateway,
+            [string]$route.RouteType,
+            $(if ($route.Actionable) { [string]$route.Gateway } else { 'On-Link' }),
             [string]$route.EffectiveMetric,
             [string]$route.RuleName
         )
@@ -3032,6 +3037,9 @@ function Show-DiscoveryDialog {
         } elseif ($route.Managed) {
             $row.DefaultCellStyle.BackColor = $script:Theme.Surface
             $row.DefaultCellStyle.ForeColor = $script:Theme.WarmText
+        } elseif (-not [bool]$route.Actionable) {
+            $row.DefaultCellStyle.BackColor = $script:Theme.Surface
+            $row.DefaultCellStyle.ForeColor = $script:Theme.MutedText
         } else {
             $row.DefaultCellStyle.BackColor = $script:Theme.Accent
             $row.DefaultCellStyle.ForeColor = $script:Theme.DarkText
@@ -3165,7 +3173,7 @@ function Show-DiscoveryDialog {
         $selectedRoutes = @(
             $grid.SelectedRows |
                 ForEach-Object { $_.Tag } |
-                Where-Object { $null -ne $_ -and -not $_.Managed }
+                Where-Object { $null -ne $_ -and -not $_.Managed -and [bool]$_.Actionable }
         )
         if ($selectedRoutes.Count -eq 0) {
             [Windows.Forms.MessageBox]::Show(
@@ -3251,7 +3259,7 @@ function Show-DiscoveryDialog {
 
     $importButton.Add_Click({ & $importRoutes $false })
     $adoptButton.Add_Click({
-        $count = @($grid.SelectedRows | ForEach-Object { $_.Tag } | Where-Object { $null -ne $_ -and -not $_.Managed }).Count
+        $count = @($grid.SelectedRows | ForEach-Object { $_.Tag } | Where-Object { $null -ne $_ -and -not $_.Managed -and [bool]$_.Actionable }).Count
         if ($count -eq 0) {
             [Windows.Forms.MessageBox]::Show('请先选择未管理路由。', '提示', 'OK', 'Information') | Out-Null
             return
