@@ -33,6 +33,14 @@ function ConvertFrom-JsonArrayText {
     }
 }
 
+Write-Host 'Core 纯逻辑单元测试...' -ForegroundColor Cyan
+$coreTest = Join-Path $PSScriptRoot 'tests\pure-core.tests.ps1'
+$coreOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $coreTest 2>&1
+if ($LASTEXITCODE -ne 0 -or ($coreOutput -join [Environment]::NewLine) -notmatch 'PURE_CORE_TEST_OK') {
+    throw "Core 单元测试失败：$($coreOutput -join [Environment]::NewLine)"
+}
+Write-Host ($coreOutput -join [Environment]::NewLine) -ForegroundColor Green
+
 Write-Host '1/10 PowerShell / 配置自检...' -ForegroundColor Cyan
 $selfTest = Invoke-ManagerReadOnly -Arguments @('-SelfTest')
 Write-Host ($selfTest -join [Environment]::NewLine) -ForegroundColor Green
