@@ -33,11 +33,11 @@ function ConvertFrom-JsonArrayText {
     }
 }
 
-Write-Host '1/8 PowerShell / 配置自检...' -ForegroundColor Cyan
+Write-Host '1/10 PowerShell / 配置自检...' -ForegroundColor Cyan
 $selfTest = Invoke-ManagerReadOnly -Arguments @('-SelfTest')
 Write-Host ($selfTest -join [Environment]::NewLine) -ForegroundColor Green
 
-Write-Host '2/8 自动识别接口...' -ForegroundColor Cyan
+Write-Host '2/10 自动识别接口...' -ForegroundColor Cyan
 $discoverText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Discover')) -join [Environment]::NewLine
 $discover = $discoverText | ConvertFrom-Json
 Write-Host (
@@ -48,7 +48,38 @@ Write-Host (
     ([int]$discover.UnmanagedSpecificRouteCount + [int]$discover.UnmanagedProxyBypassCount)
 ) -ForegroundColor Green
 
-Write-Host '3/8 策略安全审计...' -ForegroundColor Cyan
+Write-Host '3/10 多网卡 / 虚拟网络路径信息...' -ForegroundColor Cyan
+foreach ($adapter in @($discover.Adapters)) {
+    if ($null -eq $adapter.PSObject.Properties['Kind']) {
+        throw "Discover 网卡缺少 Kind：$($adapter.Name)"
+    }
+    if ($null -eq $adapter.PSObject.Properties['InterfaceMetric']) {
+        throw "Discover 网卡缺少 InterfaceMetric：$($adapter.Name)"
+    }
+}
+foreach ($route in @($discover.DefaultRoutes)) {
+    foreach ($property in @('AdapterKind','RouteMetric','InterfaceMetric','EffectiveMetric')) {
+        if ($null -eq $route.PSObject.Properties[$property]) {
+            throw "DefaultRoute 缺少 $property。"
+        }
+    }
+}
+foreach ($route in @($discover.SpecificRoutes)) {
+    foreach ($property in @('AdapterKind','RouteType','Actionable','EffectiveMetric')) {
+        if ($null -eq $route.PSObject.Properties[$property]) {
+            throw "SpecificRoute 缺少 $property。"
+        }
+    }
+}
+Write-Host (
+    "AdapterKinds={0}; MultiDefault={1}; OnLink={2}; Preferred={3}" -f
+    ((@($discover.Adapters | ForEach-Object Kind | Sort-Object -Unique)) -join ','),
+    [bool]$discover.HasMultipleDefaultRoutes,
+    [int]$discover.OnLinkRouteCount,
+    $(if ($null -eq $discover.PreferredDefaultRoute) { 'none' } else { [string]$discover.PreferredDefaultRoute.InterfaceAlias })
+) -ForegroundColor Green
+
+Write-Host '4/10 策略安全审计...' -ForegroundColor Cyan
 $auditText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Audit')) -join [Environment]::NewLine
 $audit = $auditText | ConvertFrom-Json
 Write-Host (
@@ -59,7 +90,31 @@ Write-Host (
     [int]$audit.Summary.Warning
 ) -ForegroundColor Green
 
-Write-Host '4/8 IPv4 选路解释...' -ForegroundColor Cyan
+Write-Host '5/10 状态漂移检测...' -ForegroundColor Cyan
+$driftText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Drift')) -join [Environment]::NewLine
+$drift = $driftText | ConvertFrom-Json
+if ($null -eq $drift.PSObject.Properties['Items'] -or $null -eq $drift.PSObject.Properties['Summary']) {
+    throw 'Drift 输出缺少 Items 或 Summary。'
+}
+Write-Host (
+    "Drift Healthy={0}; DriftCount={1}; Repairable={2}; ManualOnly={3}" -f
+    [bool]$drift.Healthy,
+    [int]$drift.DriftCount,
+    [int]$drift.Summary.Repairable,
+    [int]$drift.Summary.ManualOnly
+) -ForegroundColor Green
+
+$repairable = @($drift.Items | Where-Object { [bool]$_.Repairable -and -not [string]::IsNullOrWhiteSpace([string]$_.RuleId) } | Select-Object -First 1)
+if ($repairable.Count -gt 0) {
+    $repairText = (Invoke-ManagerReadOnly -Arguments @('-Command','PlanRepair','-RuleId',[string]$repairable[0].RuleId)) -join [Environment]::NewLine
+    $repair = $repairText | ConvertFrom-Json
+    if ($null -eq $repair.PSObject.Properties['Plan'] -or [string]::IsNullOrWhiteSpace([string]$repair.Fingerprint)) {
+        throw 'PlanRepair 缺少 Plan 或 Fingerprint。'
+    }
+    Write-Host "RepairPlan Rule=$($repair.RuleName); Action=$($repair.RecommendedAction); Allowed=$($repair.Plan.Allowed)" -ForegroundColor Green
+}
+
+Write-Host '6/10 IPv4 选路解释...' -ForegroundColor Cyan
 $explainText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ExplainAddress', '-Address', '127.0.0.1')) -join [Environment]::NewLine
 $explain = $explainText | ConvertFrom-Json
 if ([string]$explain.Address -ne '127.0.0.1') {
@@ -67,6 +122,13 @@ if ([string]$explain.Address -ne '127.0.0.1') {
 }
 if ([string]::IsNullOrWhiteSpace([string]$explain.SelectionRule)) {
     throw 'ExplainAddress 缺少选路原则。'
+}
+if ($null -ne $explain.SelectedRoute) {
+    foreach ($property in @('AdapterKind','RouteMetric','InterfaceMetric','EffectiveMetric')) {
+        if ($null -eq $explain.SelectedRoute.PSObject.Properties[$property]) {
+            throw "ExplainAddress SelectedRoute 缺少 $property。"
+        }
+    }
 }
 Write-Host (
     "Explain Address={0}; Routes={1}; Rules={2}; Managed={3}" -f
@@ -76,7 +138,7 @@ Write-Host (
     [bool]$explain.ManagedRuleControlsSelectedRoute
 ) -ForegroundColor Green
 
-Write-Host '5/8 变更计划 Diff...' -ForegroundColor Cyan
+Write-Host '7/10 变更计划 Diff...' -ForegroundColor Cyan
 $rulesText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ListRules')) -join [Environment]::NewLine
 $rules = @(ConvertFrom-JsonArrayText -Text $rulesText)
 if ($rules.Count -gt 0) {
@@ -99,7 +161,7 @@ if ($rules.Count -gt 0) {
     Write-Host '当前没有规则，跳过 PlanRule Diff 检查。' -ForegroundColor DarkYellow
 }
 
-Write-Host '6/8 分组与整组计划...' -ForegroundColor Cyan
+Write-Host '8/10 分组与整组计划...' -ForegroundColor Cyan
 $groupsText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'ListGroups')) -join [Environment]::NewLine
 $groups = @(ConvertFrom-JsonArrayText -Text $groupsText)
 if ($groups.Count -eq 0 -and $rules.Count -gt 0) {
@@ -126,7 +188,7 @@ if ($groups.Count -gt 0) {
     ) -ForegroundColor Green
 }
 
-Write-Host '7/8 规则状态输出...' -ForegroundColor Cyan
+Write-Host '9/10 规则状态输出...' -ForegroundColor Cyan
 $statusText = (Invoke-ManagerReadOnly -Arguments @('-DumpStatus')) -join [Environment]::NewLine
 if (-not [string]::IsNullOrWhiteSpace($statusText)) {
     [void]($statusText | ConvertFrom-Json)
@@ -134,7 +196,7 @@ if (-not [string]::IsNullOrWhiteSpace($statusText)) {
 Write-Host '规则状态 JSON 正常。' -ForegroundColor Green
 
 if ($Ui) {
-    Write-Host '8/8 UI Smoke Test...' -ForegroundColor Cyan
+    Write-Host '10/10 UI Smoke Test...' -ForegroundColor Cyan
     $imagePath = Join-Path $PSScriptRoot 'ui-smoke-test.png'
     Remove-Item -LiteralPath $imagePath -Force -ErrorAction SilentlyContinue
     $uiOutput = Invoke-ManagerReadOnly -Arguments @('-UiSmokeTest')
@@ -143,7 +205,7 @@ if ($Ui) {
     }
     Write-Host "UI Smoke Test 完成：$imagePath" -ForegroundColor Green
 } else {
-    Write-Host '8/8 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
+    Write-Host '10/10 UI Smoke Test 已跳过；需要时使用 -Ui。' -ForegroundColor DarkYellow
 }
 
 if ($Mcp) {
