@@ -17,6 +17,7 @@ Thumbs.db
 .network-policy-state.json
 NetworkPolicyManager/manager-state.json
 NetworkPolicyManager/ui-smoke-test.png
+NetworkPolicyManager/backups/
 
 # Device-specific snapshots and rollback backups
 *变更前备份*.json
