@@ -3,7 +3,7 @@ param(
     [switch]$SelfTest,
     [switch]$DumpStatus,
     [switch]$UiSmokeTest,
-    [ValidateSet('ListRules', 'Discover', 'SaveRule', 'ApplyRule', 'RemoveRule', 'TestRule')]
+    [ValidateSet('ListRules', 'Discover', 'SaveRule', 'ApplyRule', 'RemoveRule', 'TestRule', 'PlanExternalNetwork', 'AdaptExternalNetwork')]
     [string]$Command,
     [string]$RuleId,
     [string]$RuleJson,
@@ -54,16 +54,20 @@ function Read-JsonArray {
         return @()
     }
     $parsed = ConvertFrom-Json -InputObject $text
-    if ($parsed -isnot [array]) { throw "JSON 根节点必须是数组：$Path" }
+    if ($parsed -isnot [array] -and $parsed -isnot [pscustomobject]) {
+        throw "JSON 根节点必须是数组或单个对象：$Path"
+    }
     foreach ($item in $parsed) { $item }
 }
 
 function Save-Rules {
-    @($script:Rules) | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:RulesPath -Encoding UTF8
+    ConvertTo-Json -InputObject @($script:Rules) -Depth 8 |
+        Set-Content -LiteralPath $script:RulesPath -Encoding UTF8
 }
 
 function Save-State {
-    @($script:State) | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:StatePath -Encoding UTF8
+    ConvertTo-Json -InputObject @($script:State) -Depth 8 |
+        Set-Content -LiteralPath $script:StatePath -Encoding UTF8
 }
 
 function Get-NormalizedGuid {
@@ -132,6 +136,15 @@ function Test-IPv4Address {
     [Net.IPAddress]::TryParse($Value, [ref]$address) -and $address.AddressFamily -eq 'InterNetwork'
 }
 
+function Test-IPv4InPrefix {
+    param([string]$Address, [string]$Prefix)
+
+    if (-not (Test-IPv4Address -Value $Address)) { return $false }
+    $length = (ConvertTo-NormalizedPrefix -Value $Prefix).Split('/')[1]
+    (ConvertTo-NormalizedPrefix -Value "$Address/$length") -eq
+        (ConvertTo-NormalizedPrefix -Value $Prefix)
+}
+
 function Get-Adapters {
     @(
         Get-NetAdapter -IncludeHidden -ErrorAction Stop |
@@ -171,7 +184,8 @@ function Get-RuleGateway {
     param(
         [Parameter(Mandatory)]$Rule,
         [Parameter(Mandatory)]$Adapter,
-        [object[]]$Routes = $null
+        [object[]]$Routes = $null,
+        [object[]]$Addresses = $null
     )
 
     if ([string]$Rule.GatewayMode -eq 'Manual') {
@@ -179,6 +193,18 @@ function Get-RuleGateway {
             throw "规则「$($Rule.Name)」的手动网关无效。"
         }
         return [string]$Rule.Gateway
+    }
+
+    if ($null -eq $Addresses) {
+        $Addresses = @(Get-NetIPAddress -InterfaceIndex $Adapter.Index -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+    }
+    if ($Rule.PSObject.Properties.Name -contains 'Destination') {
+        $target = (ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)).Split('/')
+        $direct = @($Addresses | Where-Object {
+            [int]$target[1] -ge [int]$_.PrefixLength -and
+            (Test-IPv4InPrefix -Address $target[0] -Prefix "$($_.IPAddress)/$($_.PrefixLength)")
+        })
+        if ($direct.Count -gt 0) { return '0.0.0.0' }
     }
 
     if ($null -eq $Routes) {
@@ -192,6 +218,15 @@ function Get-RuleGateway {
         Sort-Object RouteMetric |
         Select-Object -First 1
     if ($null -eq $route) {
+        $fallback = [string]$Rule.Gateway
+        if (-not [string]::IsNullOrWhiteSpace($fallback) -and (Test-IPv4Address -Value $fallback)) {
+            if ($null -eq $Addresses) {
+                $Addresses = @(Get-NetIPAddress -InterfaceIndex $Adapter.Index -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+            }
+            $onLink = @($Addresses |
+                Where-Object { Test-IPv4InPrefix -Address $fallback -Prefix "$($_.IPAddress)/$($_.PrefixLength)" })
+            if ($onLink.Count -gt 0) { return $fallback }
+        }
         throw "网卡「$($Adapter.Name)」当前没有 IPv4 默认网关。"
     }
     [string]$route.NextHop
@@ -219,7 +254,8 @@ function Remove-StateEntry {
 
 function Get-ProxyTokens {
     $settings = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-    @(([string]$settings.ProxyOverride -split ';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $override = if ($null -ne $settings.PSObject.Properties['ProxyOverride']) { [string]$settings.ProxyOverride } else { '' }
+    @(($override -split ';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
 function Set-ProxyTokens {
@@ -258,19 +294,28 @@ function Get-ProxyTokenForRule {
 }
 
 function Get-ExactRoutes {
-    param([Parameter(Mandatory)][string]$Prefix)
-    @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $Prefix -ErrorAction SilentlyContinue)
+    param([Parameter(Mandatory)][string]$Prefix, [switch]$IncludePersistent)
+    $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $Prefix -ErrorAction SilentlyContinue)
+    if ($IncludePersistent) {
+        $routes += @(Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -DestinationPrefix $Prefix -ErrorAction SilentlyContinue)
+    }
+    @($routes | Sort-Object InterfaceIndex, NextHop -Unique)
 }
 
 function Add-ExactRoute {
     param(
         [Parameter(Mandatory)][string]$Prefix,
         [Parameter(Mandatory)][string]$Gateway,
-        [Parameter(Mandatory)][int]$InterfaceIndex
+        [Parameter(Mandatory)][int]$InterfaceIndex,
+        [switch]$ActiveOnly,
+        [int]$Metric = 5
     )
 
     $parts = ConvertTo-RouteParts -Prefix $Prefix
-    $output = & route.exe -p add $parts.Destination mask $parts.Mask $Gateway metric 5 if $InterfaceIndex 2>&1
+    $arguments = @()
+    if (-not $ActiveOnly) { $arguments += '-p' }
+    $arguments += @('add', $parts.Destination, 'mask', $parts.Mask, $Gateway, 'metric', [string]$Metric, 'if', [string]$InterfaceIndex)
+    $output = & route.exe @arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "添加持久路由失败：$Prefix -> $Gateway`n$($output -join "`n")"
     }
@@ -287,11 +332,11 @@ function Remove-ExactRoute {
     $arguments = @('delete', $parts.Destination, 'mask', $parts.Mask, $Gateway)
     if ($InterfaceIndex -gt 0) { $arguments += @('if', [string]$InterfaceIndex) }
     $output = & route.exe @arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $stillExists = @(Get-ExactRoutes -Prefix $Prefix | Where-Object NextHop -eq $Gateway).Count -gt 0
-        if ($stillExists) {
-            throw "删除路由失败：$Prefix -> $Gateway`n$($output -join "`n")"
-        }
+    $stillExists = @(Get-ExactRoutes -Prefix $Prefix -IncludePersistent | Where-Object {
+        $_.NextHop -eq $Gateway -and ($InterfaceIndex -eq 0 -or $_.InterfaceIndex -eq $InterfaceIndex)
+    }).Count -gt 0
+    if ($stillExists) {
+        throw "删除路由失败：$Prefix -> $Gateway`n$($output -join "`n")"
     }
 }
 
@@ -301,6 +346,7 @@ function Get-SystemSnapshot {
     [pscustomobject]@{
         Adapters = $adapters
         Routes = $routes
+        Addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
         ProxyTokens = @(Get-ProxyTokens)
     }
 }
@@ -415,7 +461,7 @@ function Get-RuleStatus {
     try {
         $adapter = Resolve-Adapter -Rule $Rule -Adapters $Snapshot.Adapters
         $prefix = ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)
-        $gateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $Snapshot.Routes
+        $gateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $Snapshot.Routes -Addresses @($Snapshot.Addresses | Where-Object InterfaceIndex -eq $adapter.Index)
         $exact = @($Snapshot.Routes | Where-Object DestinationPrefix -eq $prefix)
         $matching = @($exact | Where-Object {
             $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $gateway
@@ -427,7 +473,11 @@ function Get-RuleStatus {
                 Actual = $actual; Color = 'Red'
             }
         }
-        if ($matching.Count -eq 0) {
+        $direct = $gateway -eq '0.0.0.0' -and @($Snapshot.Routes | Where-Object {
+            $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq '0.0.0.0' -and
+            (Test-IPv4InPrefix -Address $prefix.Split('/')[0] -Prefix $_.DestinationPrefix)
+        }).Count -gt 0
+        if ($matching.Count -eq 0 -and -not $direct) {
             return [pscustomobject]@{ State = 'Missing'; Text = '未应用'; Actual = ''; Color = 'Orange' }
         }
         if ([bool]$Rule.BypassProxy) {
@@ -439,7 +489,7 @@ function Get-RuleStatus {
                 }
             }
         }
-        $text = if ($adapter.Status -eq 'Up') { '已应用' } else { '已配置（网卡未连接）' }
+        $text = if ($adapter.Status -ne 'Up') { '已配置（网卡未连接）' } elseif ($direct) { '已应用（同网段直连）' } else { '已应用' }
         [pscustomobject]@{
             State = 'Applied'; Text = $text; Actual = "$($adapter.Name) / $gateway"
             Color = if ($adapter.Status -eq 'Up') { 'Green' } else { 'Gray' }
@@ -450,7 +500,7 @@ function Get-RuleStatus {
 }
 
 function Apply-RulePolicy {
-    param([Parameter(Mandatory)]$Rule)
+    param([Parameter(Mandatory)]$Rule, [switch]$AdaptOwnedRoute)
 
     if (-not (Test-IsAdministrator)) {
         throw '应用规则需要管理员权限。请通过桌面快捷方式启动。'
@@ -465,9 +515,14 @@ function Apply-RulePolicy {
         throw "网卡「$($adapter.Name)」当前未连接，请插好网线后再应用。"
     }
     $prefix = ConvertTo-NormalizedPrefix -Value ([string]$Rule.Destination)
+    $addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.Index -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+    if ($addresses.Count -eq 0) { throw '外接网卡尚未取得 IPv4 地址，请先完成网卡 IP 设置。' }
+    if ($prefix.EndsWith('/32') -and $prefix.Split('/')[0] -in @($addresses | ForEach-Object IPAddress)) {
+        throw '目标填写的是本机 IP。请填写需要访问的服务器 IP 或网段。'
+    }
     $gateway = Get-RuleGateway -Rule $Rule -Adapter $adapter
     $previous = Get-StateEntry -Id ([string]$Rule.Id)
-    $exact = Get-ExactRoutes -Prefix $prefix
+    $exact = @(Get-ExactRoutes -Prefix $prefix -IncludePersistent)
     $matching = @($exact | Where-Object {
         $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $gateway
     })
@@ -475,33 +530,51 @@ function Apply-RulePolicy {
         $_.InterfaceIndex -ne $adapter.Index -or $_.NextHop -ne $gateway
     })
 
-    $removedPrevious = $false
+    $removedRoutes = @()
     if ($conflicts.Count -gt 0) {
-        $canReplacePrevious = $null -ne $previous -and [bool]$previous.RouteOwned -and
-            @($conflicts | Where-Object NextHop -ne ([string]$previous.Gateway)).Count -eq 0
-        if (-not $canReplacePrevious) {
+        if (@($conflicts | Where-Object NextHop -eq '0.0.0.0').Count -gt 0) {
+            throw "目标 $prefix 存在系统直连路由，未覆盖。"
+        }
+        $previousOwnsAdapter = $null -ne $previous -and
+            (Get-NormalizedGuid -Value ([string]$previous.AdapterGuid)) -eq $adapter.Guid
+        $canReplacePrevious = $previousOwnsAdapter -and [bool]$previous.RouteOwned -and
+            @($conflicts | Where-Object {
+                $_.NextHop -ne ([string]$previous.Gateway) -or $_.InterfaceIndex -ne $adapter.Index
+            }).Count -eq 0
+        $fallback = [string]$Rule.Gateway
+        $canReplaceFallback = [bool]$Rule.OwnExistingRoute -and
+            [string]$Rule.GatewayMode -eq 'Auto' -and -not [string]::IsNullOrWhiteSpace($fallback) -and
+            (Test-IPv4Address -Value $fallback) -and
+            @($conflicts | Where-Object { $_.InterfaceIndex -ne $adapter.Index -or $_.NextHop -ne $fallback }).Count -eq 0
+        $canAdaptOwned = $AdaptOwnedRoute -and
+            ([bool]$Rule.OwnExistingRoute -or ($previousOwnsAdapter -and [bool]$previous.RouteOwned)) -and
+            @($conflicts | Where-Object { $_.InterfaceIndex -ne $adapter.Index -or $_.NextHop -eq '0.0.0.0' }).Count -eq 0
+        if (-not ($canReplacePrevious -or $canReplaceFallback -or $canAdaptOwned)) {
             $details = ($conflicts | ForEach-Object { "$($_.InterfaceAlias) / $($_.NextHop)" }) -join ', '
             throw "目标 $prefix 已有其他路由：$details。为避免覆盖，未做修改。"
         }
-        $previousAdapter = @($adapters | Where-Object Guid -eq (Get-NormalizedGuid -Value ([string]$previous.AdapterGuid))) |
-            Select-Object -First 1
-        $previousIndex = if ($null -ne $previousAdapter) { $previousAdapter.Index } else { [int]$previous.InterfaceIndex }
-        Remove-ExactRoute -Prefix ([string]$previous.Destination) -Gateway ([string]$previous.Gateway) `
-            -InterfaceIndex $previousIndex
-        $removedPrevious = $true
-        $matching = @()
     }
 
     $routeCreated = $false
     $proxyAdded = $false
     try {
-        if ($matching.Count -eq 0) {
+        $persistent = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -DestinationPrefix $prefix -ErrorAction SilentlyContinue)
+        foreach ($oldRoute in $conflicts) {
+            $backup = [pscustomobject]@{
+                Destination = $prefix; Gateway = [string]$oldRoute.NextHop; InterfaceIndex = [int]$oldRoute.InterfaceIndex
+                Metric = [int]$oldRoute.RouteMetric
+                Persistent = @($persistent | Where-Object { $_.NextHop -eq $oldRoute.NextHop -and $_.InterfaceIndex -eq $oldRoute.InterfaceIndex }).Count -gt 0
+            }
+            Remove-ExactRoute -Prefix $prefix -Gateway $backup.Gateway -InterfaceIndex $backup.InterfaceIndex
+            $removedRoutes += $backup
+        }
+        if ($gateway -ne '0.0.0.0' -and $matching.Count -eq 0) {
             Add-ExactRoute -Prefix $prefix -Gateway $gateway -InterfaceIndex $adapter.Index
             $routeCreated = $true
         }
 
-        $routeOwned = $routeCreated -or [bool]$Rule.OwnExistingRoute -or
-            ($null -ne $previous -and [bool]$previous.RouteOwned)
+        $routeOwned = $gateway -ne '0.0.0.0' -and ($routeCreated -or [bool]$Rule.OwnExistingRoute -or
+            ($null -ne $previous -and [bool]$previous.RouteOwned))
         $proxyToken = Get-ProxyTokenForRule -Rule $Rule
         $proxyOwned = $false
         if (-not [string]::IsNullOrWhiteSpace($proxyToken)) {
@@ -528,14 +601,24 @@ function Apply-RulePolicy {
             ProxyOwned = [bool]$proxyOwned
             AppliedAt = (Get-Date).ToString('o')
         }
-        Set-StateEntry -Entry $entry
-
-        $verified = @(Get-ExactRoutes -Prefix $prefix | Where-Object {
-            $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $gateway
+        $verified = @(if ($gateway -eq '0.0.0.0') {
+            @(Get-NetRoute -InterfaceIndex $adapter.Index -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {
+                $_.NextHop -eq '0.0.0.0' -and
+                (Test-IPv4InPrefix -Address ($prefix.Split('/')[0]) -Prefix $_.DestinationPrefix)
+            })
+        } else {
+            @(Get-ExactRoutes -Prefix $prefix | Where-Object {
+                $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $gateway
+            })
         })
         if ($verified.Count -eq 0) {
             throw "应用后验证失败：$prefix"
         }
+        if ($gateway -ne '0.0.0.0' -and @(Get-NetRoute -PolicyStore PersistentStore -AddressFamily IPv4 -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
+            Where-Object { $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $gateway }).Count -eq 0) {
+            throw "持久路由验证失败：$prefix"
+        }
+        Set-StateEntry -Entry $entry
         Write-AppLog -Message "已应用：$($Rule.Name) | $prefix -> $($adapter.Name) / $gateway"
     } catch {
         if ($routeCreated) {
@@ -544,13 +627,88 @@ function Apply-RulePolicy {
         if ($proxyAdded) {
             try { Set-ProxyTokens -Tokens @((Get-ProxyTokens) | Where-Object { $_ -ne $proxyToken }) } catch { }
         }
-        if ($removedPrevious -and $null -ne $previous) {
+        foreach ($removedRoute in $removedRoutes) {
             try {
-                Add-ExactRoute -Prefix ([string]$previous.Destination) -Gateway ([string]$previous.Gateway) `
-                    -InterfaceIndex ([int]$previous.InterfaceIndex)
+                Add-ExactRoute -Prefix ([string]$removedRoute.Destination) -Gateway ([string]$removedRoute.Gateway) `
+                    -InterfaceIndex ([int]$removedRoute.InterfaceIndex) -Metric $removedRoute.Metric -ActiveOnly:(-not $removedRoute.Persistent)
             } catch { }
         }
+        $script:State = @($script:State | Where-Object Id -ne $Rule.Id)
+        if ($null -ne $previous) { $script:State += $previous }
+        try { Save-State } catch { }
         throw
+    }
+}
+
+function Get-ExternalNetworkPlan {
+    $adapter = @(Get-Adapters | Where-Object Name -eq '外接主网线')
+    if ($adapter.Count -ne 1 -or $adapter[0].Status -ne 'Up') { throw '请先连接并启用「外接主网线」。' }
+    $adapter = $adapter[0]
+    $rules = @($script:Rules | Where-Object {
+        [bool]$_.Enabled -and (Get-NormalizedGuid -Value ([string]$_.AdapterGuid)) -eq $adapter.Guid
+    })
+    if ($rules.Count -eq 0) { throw '没有指定到外接主网线的启用规则。' }
+    if (@($rules | Where-Object { (ConvertTo-NormalizedPrefix -Value $_.Destination) -eq '0.0.0.0/0' }).Count -gt 0) {
+        throw '一键适配仅支持服务器 IP 或网段，不处理默认路由。'
+    }
+    $probe = [pscustomobject]@{ Name = '当前外接网络'; GatewayMode = 'Auto'; Gateway = [string]$rules[0].Gateway }
+    $gateway = Get-RuleGateway -Rule $probe -Adapter $adapter
+    $addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.Index -AddressFamily IPv4 -ErrorAction Stop |
+        Where-Object { [string]$_.AddressState -eq 'Preferred' } | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
+    if ($addresses.Count -eq 0) { throw '外接主网线尚未取得可用 IPv4 地址。' }
+    [pscustomobject]@{ Adapter = $adapter; IPv4 = $addresses; Gateway = $gateway; RuleIds = @($rules.Id); RuleCount = $rules.Count }
+}
+
+function Adapt-ExternalNetwork {
+    if (-not (Test-IsAdministrator)) { throw '适配外接网线需要管理员权限。' }
+    $script:Rules = @(Read-JsonArray -Path $script:RulesPath)
+    $script:State = @(Read-JsonArray -Path $script:StatePath)
+    Assert-Configuration
+    $plan = Get-ExternalNetworkPlan
+    $errors = @()
+    $success = 0
+    foreach ($id in $plan.RuleIds) {
+        $rule = Get-RuleById -Id $id
+        $adapted = $rule.PSObject.Copy()
+        $adapted.GatewayMode = 'Auto'
+        try {
+            Apply-RulePolicy -Rule $adapted -AdaptOwnedRoute
+            $script:Rules = @($script:Rules | ForEach-Object { if ($_.Id -eq $id) { $adapted } else { $_ } })
+            $success++
+        } catch {
+            $errors += "$($rule.Name)：$($_.Exception.Message)"
+            Write-AppLog -Message $errors[-1] -Level 'ERROR'
+        }
+    }
+    Save-Rules
+    Write-AppLog -Message "已适配当前外接网线：$($plan.IPv4 -join ', ') / $($plan.Gateway)；成功=$success，失败=$($errors.Count)"
+    [pscustomobject]@{ IPv4 = $plan.IPv4; Gateway = $plan.Gateway; SuccessCount = $success; FailureCount = $errors.Count; Errors = @($errors) }
+}
+
+function Repair-ManagedAutoRoutes {
+    if (-not (Test-IsAdministrator)) { return }
+    foreach ($rule in @($script:Rules | Where-Object { [bool]$_.Enabled -and [string]$_.GatewayMode -eq 'Auto' })) {
+        $state = Get-StateEntry -Id ([string]$rule.Id)
+        if ($null -eq $state -or -not [bool]$state.RouteOwned) { continue }
+        try {
+            $adapter = Resolve-Adapter -Rule $rule
+            if ($adapter.Status -ne 'Up') { continue }
+            $expected = Get-RuleGateway -Rule $rule -Adapter $adapter
+            $prefix = ConvertTo-NormalizedPrefix -Value ([string]$rule.Destination)
+            $matching = @(Get-ExactRoutes -Prefix $prefix | Where-Object {
+                $_.InterfaceIndex -eq $adapter.Index -and $_.NextHop -eq $expected
+            })
+            if ($matching.Count -gt 0 -and [string]$state.Gateway -eq $expected) { continue }
+            Apply-RulePolicy -Rule $rule
+            $script:LastAutoRepairError = ''
+            Write-AppLog -Message "已自动修复或同步网关变化：$($rule.Name) -> $expected"
+        } catch {
+            $message = "自动修复失败：$($rule.Name) | $($_.Exception.Message)"
+            if ($message -ne $script:LastAutoRepairError) {
+                Write-AppLog -Message $message -Level 'ERROR'
+                $script:LastAutoRepairError = $message
+            }
+        }
     }
 }
 
@@ -567,7 +725,7 @@ function Remove-RulePolicy {
     $adapter = $null
     try { $adapter = Resolve-Adapter -Rule $Rule -Adapters $adapters } catch { }
 
-    $routeOwned = ($null -ne $state -and [bool]$state.RouteOwned) -or [bool]$Rule.OwnExistingRoute
+    $routeOwned = if ($null -ne $state) { [bool]$state.RouteOwned } else { [bool]$Rule.OwnExistingRoute }
     if ($routeOwned) {
         $routePrefix = if ($null -ne $state) { [string]$state.Destination } else { $prefix }
         $routes = Get-ExactRoutes -Prefix $routePrefix
@@ -579,7 +737,7 @@ function Remove-RulePolicy {
         if ([string]::IsNullOrWhiteSpace($gateway) -and $null -ne $adapter) {
             $gateway = [string](@($routes | Where-Object InterfaceIndex -eq $adapter.Index) | Select-Object -First 1).NextHop
         }
-        if (-not [string]::IsNullOrWhiteSpace($gateway)) {
+        if (-not [string]::IsNullOrWhiteSpace($gateway) -and $gateway -ne '0.0.0.0') {
             $index = if ($null -ne $adapter) { [int]$adapter.Index } elseif ($null -ne $state) {
                 [int]$state.InterfaceIndex
             } else { 0 }
@@ -626,7 +784,7 @@ function Test-RulePolicy {
     $expectedGateway = ''
     try {
         $adapter = Resolve-Adapter -Rule $Rule -Adapters $snapshot.Adapters
-        $expectedGateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $snapshot.Routes
+        $expectedGateway = Get-RuleGateway -Rule $Rule -Adapter $adapter -Routes $snapshot.Routes -Addresses @($snapshot.Addresses | Where-Object InterfaceIndex -eq $adapter.Index)
     } catch { }
 
     $proxyToken = ''
@@ -682,8 +840,9 @@ function Assert-Configuration {
         if ([string]$rule.GatewayMode -notin @('Auto', 'Manual')) {
             throw "规则「$($rule.Name)」的网关模式无效。"
         }
-        if ([string]$rule.GatewayMode -eq 'Manual' -and -not (Test-IPv4Address -Value ([string]$rule.Gateway))) {
-            throw "规则「$($rule.Name)」的手动网关无效。"
+        if (([string]$rule.GatewayMode -eq 'Manual' -or -not [string]::IsNullOrWhiteSpace([string]$rule.Gateway)) -and
+            -not (Test-IPv4Address -Value ([string]$rule.Gateway))) {
+            throw "规则「$($rule.Name)」的手动/备用网关无效。"
         }
         if ([string]::IsNullOrWhiteSpace([string]$rule.AdapterGuid) -and
             [string]::IsNullOrWhiteSpace([string]$rule.AdapterDescription)) {
@@ -725,6 +884,17 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
             Get-NetworkPolicyDiscovery | ConvertTo-Json -Depth 8
             exit 0
         }
+        'PlanExternalNetwork' {
+            Get-ExternalNetworkPlan | ConvertTo-Json -Depth 6
+            exit 0
+        }
+        'AdaptExternalNetwork' {
+            if (-not $Approved) { throw '适配外接网线需要显式传入 -Approved。' }
+            $result = Adapt-ExternalNetwork
+            $result | ConvertTo-Json -Depth 6
+            if ($result.FailureCount -gt 0) { exit 1 }
+            exit 0
+        }
         'SaveRule' {
             if ([string]::IsNullOrWhiteSpace($RuleJson)) { throw 'SaveRule 需要 -RuleJson。' }
             $incoming = $RuleJson | ConvertFrom-Json
@@ -736,7 +906,7 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
                 AdapterGuid = Get-NormalizedGuid -Value ([string]$incoming.AdapterGuid)
                 AdapterDescription = [string]$incoming.AdapterDescription
                 GatewayMode = if ([string]$incoming.GatewayMode -eq 'Auto') { 'Auto' } else { 'Manual' }
-                Gateway = if ([string]$incoming.GatewayMode -eq 'Auto') { '' } else { [string]$incoming.Gateway }
+                Gateway = [string]$incoming.Gateway
                 BypassProxy = [bool]$incoming.BypassProxy
                 Enabled = if ($null -eq $incoming.Enabled) { $true } else { [bool]$incoming.Enabled }
                 OwnExistingRoute = [bool]$incoming.OwnExistingRoute
@@ -781,6 +951,27 @@ if (-not [string]::IsNullOrWhiteSpace($Command)) {
 }
 
 if ($SelfTest) {
+    $testAdapter = [pscustomobject]@{ Index = 711; Name = '测试网卡' }
+    $testRule = [pscustomobject]@{ GatewayMode = 'Auto'; Gateway = '172.16.21.254' }
+    $testDefault = @([pscustomobject]@{
+        DestinationPrefix = '0.0.0.0/0'; InterfaceIndex = 711; NextHop = '172.16.23.254'; RouteMetric = 256
+    })
+    $testOldAddress = @([pscustomobject]@{ IPAddress = '172.16.21.171'; PrefixLength = 24 })
+    if ((Get-RuleGateway -Rule $testRule -Adapter $testAdapter -Routes $testDefault -Addresses $testOldAddress) -ne '172.16.23.254') {
+        throw '网关自检失败：未优先使用当前默认网关。'
+    }
+    if ((Get-RuleGateway -Rule $testRule -Adapter $testAdapter -Routes @() -Addresses $testOldAddress) -ne '172.16.21.254') {
+        throw '网关自检失败：未使用同网段备用网关。'
+    }
+    $testCurrentAddress = @([pscustomobject]@{ IPAddress = '172.16.23.248'; PrefixLength = 24 })
+    $testSameSubnet = [pscustomobject]@{ Name = '同网段服务器'; GatewayMode = 'Auto'; Gateway = '172.16.21.254'; Destination = '172.16.23.120/32' }
+    if ((Get-RuleGateway -Rule $testSameSubnet -Adapter $testAdapter -Routes $testDefault -Addresses $testCurrentAddress) -ne '0.0.0.0') {
+        throw '网关自检失败：同网段服务器未直连。'
+    }
+    $testRemoteSubnet = [pscustomobject]@{ Name = '所内服务器'; GatewayMode = 'Auto'; Gateway = '172.16.21.254'; Destination = '172.16.11.0/24' }
+    if ((Get-RuleGateway -Rule $testRemoteSubnet -Adapter $testAdapter -Routes $testDefault -Addresses $testCurrentAddress) -ne '172.16.23.254') {
+        throw '网关自检失败：换线后未使用当前网关访问远端网段。'
+    }
     "SELF_TEST_OK rules=$($script:Rules.Count) state=$($script:State.Count)"
     exit 0
 }
@@ -913,7 +1104,7 @@ function Show-RuleEditor {
     $dialog.BackColor = $script:Theme.Background
     $dialog.ForeColor = $script:Theme.WarmText
 
-    $labels = @('规则名称', '目标 IPv4 / CIDR', '指定网卡', '网关模式', '手动网关')
+    $labels = @('规则名称', '目标 IPv4 / CIDR', '指定网卡', '网关模式', '手动/备用网关')
     for ($i = 0; $i -lt $labels.Count; $i++) {
         $label = [Windows.Forms.Label]::new()
         $label.Text = $labels[$i]
@@ -986,9 +1177,7 @@ function Show-RuleEditor {
     $dialog.CancelButton = $cancelButton
     $dialog.Controls.Add($cancelButton)
 
-    $gatewayModeBox.Add_SelectedIndexChanged({
-        $gatewayBox.Enabled = $gatewayModeBox.SelectedIndex -eq 1
-    })
+    $gatewayBox.Enabled = $true
 
     if ($isEdit) {
         $nameBox.Text = [string]$Rule.Name
@@ -1025,6 +1214,10 @@ function Show-RuleEditor {
             if ($mode -eq 'Manual' -and -not (Test-IPv4Address -Value $gateway)) {
                 throw '请输入有效的手动 IPv4 网关。'
             }
+            if ($mode -eq 'Auto' -and -not [string]::IsNullOrWhiteSpace($gateway) -and
+                -not (Test-IPv4Address -Value $gateway)) {
+                throw '请输入有效的备用 IPv4 网关，或留空。'
+            }
             if ($bypassCheck.Checked -and -not $prefix.EndsWith('/32')) {
                 throw '系统代理绕过仅支持单个 IPv4（/32）。'
             }
@@ -1039,7 +1232,7 @@ function Show-RuleEditor {
                 AdapterGuid = [string]$adapter.Guid
                 AdapterDescription = [string]$adapter.Description
                 GatewayMode = $mode
-                Gateway = if ($mode -eq 'Manual') { $gateway } else { '' }
+                Gateway = $gateway
                 BypassProxy = [bool]$bypassCheck.Checked
                 Enabled = [bool]$enabledCheck.Checked
                 OwnExistingRoute = if ($sameManagedIdentity) { [bool]$Rule.OwnExistingRoute } else { $false }
@@ -1453,7 +1646,7 @@ $titleLabel.Location = [Drawing.Point]::new(34, 31)
 $header.Controls.Add($titleLabel)
 
 $descriptionLabel = [Windows.Forms.Label]::new()
-$descriptionLabel.Text = '自动识别当前网络 · 精确 IPv4/CIDR 分流 · 先看清现状，再决定是否接管'
+$descriptionLabel.Text = '换网线或本机 IP 后，点击右侧「适配当前外接网线」'
 $descriptionLabel.ForeColor = $script:Theme.MutedText
 $descriptionLabel.AutoSize = $true
 $descriptionLabel.Location = [Drawing.Point]::new(37, 72)
@@ -1464,9 +1657,17 @@ $summaryLabel.Anchor = 'Top,Right'
 $summaryLabel.TextAlign = 'MiddleRight'
 $summaryLabel.ForeColor = $script:Theme.Accent
 $summaryLabel.Font = [Drawing.Font]::new('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Bold)
-$summaryLabel.Location = [Drawing.Point]::new(855, 21)
-$summaryLabel.Size = [Drawing.Size]::new(490, 58)
+$summaryLabel.Location = [Drawing.Point]::new(855, 52)
+$summaryLabel.Size = [Drawing.Size]::new(490, 44)
 $header.Controls.Add($summaryLabel)
+
+$adaptNetworkButton = New-UiButton -Text '适配当前外接网线' -Width 188 -Variant 'Primary'
+$header.Controls.Add($adaptNetworkButton)
+$header.Add_Resize({
+    $adaptNetworkButton.Location = [Drawing.Point]::new(($header.ClientSize.Width - $adaptNetworkButton.Width - 18), 8)
+    $summaryLabel.Left = [Math]::Max(610, ($header.ClientSize.Width - 510))
+    $summaryLabel.Width = [Math]::Max(180, ($header.ClientSize.Width - $summaryLabel.Left - 20))
+})
 
 function New-MetricCard {
     param(
@@ -1749,11 +1950,19 @@ $footer.Controls.Add($visibleCountLabel)
 
 $autoRefreshCheck = [Windows.Forms.CheckBox]::new()
 $autoRefreshCheck.Text = '15 秒自动刷新'
-$autoRefreshCheck.Checked = $true
+$autoRefreshCheck.Checked = $false
 $autoRefreshCheck.AutoSize = $true
 $autoRefreshCheck.ForeColor = $script:Theme.Accent
 $autoRefreshCheck.Margin = [Windows.Forms.Padding]::new(0, 3, 16, 0)
 $footer.Controls.Add($autoRefreshCheck)
+
+$autoRepairCheck = [Windows.Forms.CheckBox]::new()
+$autoRepairCheck.Text = '网关变化时自动修复'
+$autoRepairCheck.Checked = $false
+$autoRepairCheck.AutoSize = $true
+$autoRepairCheck.ForeColor = $script:Theme.Accent
+$autoRepairCheck.Margin = [Windows.Forms.Padding]::new(0, 3, 16, 0)
+$footer.Controls.Add($autoRepairCheck)
 
 $toggleLogButton = [Windows.Forms.Button]::new()
 $toggleLogButton.Text = '隐藏日志'
@@ -1844,7 +2053,9 @@ function Update-RuleDetail {
     }
 
     $adapterText = if ($item.Count -gt 0) { [string]$item[0].AdapterName } else { [string]$rule.AdapterDescription }
-    $gatewayText = if ([string]$rule.GatewayMode -eq 'Manual') { [string]$rule.Gateway } else { '自动读取当前默认网关' }
+    $gatewayText = if ([string]$rule.GatewayMode -eq 'Manual') { [string]$rule.Gateway } else {
+        '自动读取当前默认网关' + $(if ([string]::IsNullOrWhiteSpace([string]$rule.Gateway)) { '' } else { "；备用 $($rule.Gateway)" })
+    }
     $ownership = if ($null -ne $state -and [bool]$state.RouteOwned) {
         '由本程序接管'
     } elseif ([bool]$rule.OwnExistingRoute) {
@@ -1998,11 +2209,10 @@ function Refresh-Grid {
         $pendingMetric.Value.ForeColor = if ($pending -gt 0) { $script:Theme.DarkText } else { $script:Theme.Accent }
         $pendingMetric.Title.ForeColor = if ($pending -gt 0) { $script:Theme.DarkText } else { $script:Theme.MutedText }
 
-        $summaryLabel.Text = if ($pending -gt 0) {
-            '已自动识别当前网络' + [Environment]::NewLine + "发现 $pending 条未纳入管理的现有策略"
-        } else {
-            '已自动识别当前网络' + [Environment]::NewLine + '当前没有待处理的现有策略'
-        }
+        try {
+            $external = Get-ExternalNetworkPlan
+            $summaryLabel.Text = "外接 IP：$($external.IPv4 -join ', ')" + [Environment]::NewLine + "当前网关：$($external.Gateway)"
+        } catch { $summaryLabel.Text = '连接外接网线后，可手动适配已有策略' }
         $lastRefreshLabel.Text = "最后刷新 $(Get-Date -Format 'HH:mm:ss')"
         Render-RuleGrid
     } catch {
@@ -2072,7 +2282,7 @@ function Restore-RulesFromFile {
             AdapterGuid = Get-NormalizedGuid -Value ([string]$rule.AdapterGuid)
             AdapterDescription = [string]$rule.AdapterDescription
             GatewayMode = if ([string]$rule.GatewayMode -eq 'Auto') { 'Auto' } else { 'Manual' }
-            Gateway = if ([string]$rule.GatewayMode -eq 'Auto') { '' } else { [string]$rule.Gateway }
+            Gateway = [string]$rule.Gateway
             BypassProxy = [bool]$rule.BypassProxy
             Enabled = [bool]$rule.Enabled
             OwnExistingRoute = $false
@@ -2245,6 +2455,28 @@ $applyButton.Add_Click({
     }
 })
 
+$adaptNetworkButton.Add_Click({
+    try {
+        $plan = Get-ExternalNetworkPlan
+        $message = "当前外接 IP：$($plan.IPv4 -join ', ')" + [Environment]::NewLine +
+            "当前网关：$($plan.Gateway)" + [Environment]::NewLine +
+            "将适配 $($plan.RuleCount) 条原有策略。以后换线后再点击本按钮即可。"
+        if ([Windows.Forms.MessageBox]::Show($message, '适配当前外接网线', 'YesNo', 'Question') -ne 'Yes') { return }
+        $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+        $result = Adapt-ExternalNetwork
+        Refresh-Grid
+        if ($result.FailureCount -gt 0) {
+            [Windows.Forms.MessageBox]::Show("已适配 $($result.SuccessCount) 条；$($result.FailureCount) 条需要处理：" +
+                [Environment]::NewLine + ($result.Errors -join [Environment]::NewLine), '适配结果', 'OK', 'Warning') | Out-Null
+        } else {
+            [Windows.Forms.MessageBox]::Show("已适配 $($result.SuccessCount) 条策略，可以保持两张网卡同时启用。", '适配完成', 'OK', 'Information') | Out-Null
+        }
+    } catch {
+        Write-AppLog -Message ("适配失败：" + $_.Exception.Message) -Level 'ERROR'
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, '适配失败', 'OK', 'Error') | Out-Null
+    } finally { $form.Cursor = [Windows.Forms.Cursors]::Default }
+})
+
 $applyAllButton.Add_Click({
     $enabledRules = @($script:Rules | Where-Object Enabled)
     if ($enabledRules.Count -eq 0) { return }
@@ -2353,8 +2585,9 @@ $form.Add_KeyDown({
 $script:RefreshTimer = [Windows.Forms.Timer]::new()
 $script:RefreshTimer.Interval = 15000
 $script:RefreshTimer.Add_Tick({
-    if ($autoRefreshCheck.Checked -and $form.Visible -and -not $form.IsDisposed) {
-        Refresh-Grid
+    if ($form.Visible -and -not $form.IsDisposed) {
+        if ($autoRepairCheck.Checked) { Repair-ManagedAutoRoutes }
+        if ($autoRefreshCheck.Checked) { Refresh-Grid }
     }
 })
 $script:RefreshTimer.Start()
@@ -2367,6 +2600,8 @@ $toolTip.SetToolTip($backupButton, '导出规则定义备份，不包含系统�
 $toolTip.SetToolTip($restoreButton, '导入规则备份；不会立即修改 Windows 网络')
 $toolTip.SetToolTip($applyButton, '应用当前规则到 Windows')
 $toolTip.SetToolTip($testButton, '只读诊断 Windows 实际选路和代理状态')
+$toolTip.SetToolTip($adaptNetworkButton, '换网线或本机 IP 后点击一次：读取当前外接网关，适配已有服务器策略')
+$toolTip.SetToolTip($autoRepairCheck, '仅窗口运行且处于管理员模式时，自动修复本程序已接管的自动网关规则；不会修改网卡 IP 或默认路由')
 
 $isAdministrator = Test-IsAdministrator
 $modeLabel.Text = if ($isAdministrator) {
@@ -2377,8 +2612,10 @@ $modeLabel.Text = if ($isAdministrator) {
 $modeLabel.ForeColor = if ($isAdministrator) { $script:Theme.Accent } else { $script:Theme.AccentStrong }
 
 if (-not $isAdministrator) {
-    @($addButton, $editButton, $deleteButton, $applyButton, $applyAllButton, $removeButton) |
+    @($addButton, $editButton, $deleteButton, $applyButton, $applyAllButton, $removeButton, $adaptNetworkButton) |
         ForEach-Object { $_.Enabled = $false }
+    $autoRepairCheck.Checked = $false
+    $autoRepairCheck.Enabled = $false
     $descriptionLabel.Text += ' · 当前为只读模式'
 } else {
     Set-SelectedActionState -HasSelection $false
@@ -2391,16 +2628,13 @@ if (Test-Path -LiteralPath $script:LogPath) {
 
 $form.Add_Shown({
     Write-AppLog -Message "程序启动；管理员=$isAdministrator"
+    if ($autoRepairCheck.Checked) { Repair-ManagedAutoRoutes }
     Refresh-Grid
 
     if ($null -ne $script:LastDiscovery) {
         $pending = [int]$script:LastDiscovery.UnmanagedSpecificRouteCount +
             [int]$script:LastDiscovery.UnmanagedProxyBypassCount
         Write-AppLog -Message "自动识别完成：特定目标路由=$($script:LastDiscovery.SpecificRoutes.Count)，待处理=$pending"
-        if (-not $UiSmokeTest -and $pending -gt 0) {
-            $summaryLabel.Text = '已自动识别当前网络' + [Environment]::NewLine +
-                "发现 $pending 条现有策略待你决定是否纳入管理"
-        }
     }
 
     if ($UiSmokeTest) {
