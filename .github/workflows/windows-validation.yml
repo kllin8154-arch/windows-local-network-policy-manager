@@ -55,6 +55,10 @@ jobs:
             throw 'Network switch memory regressions did not complete successfully.'
           }
 
+      - name: Proxy discovery memory regressions
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\tests\proxy-discovery.tests.ps1"
+
       - name: Read-only discovery
         shell: powershell
         run: |

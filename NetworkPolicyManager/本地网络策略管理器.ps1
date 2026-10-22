@@ -254,7 +254,8 @@ function Remove-StateEntry {
 
 function Get-ProxyTokens {
     $settings = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-    @(([string]$settings.ProxyOverride -split ';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $override = if ($null -ne $settings.PSObject.Properties['ProxyOverride']) { [string]$settings.ProxyOverride } else { '' }
+    @(($override -split ';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
 function Set-ProxyTokens {
