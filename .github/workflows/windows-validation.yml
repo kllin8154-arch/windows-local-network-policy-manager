@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/auto-discovery-mcp
+      - main
   pull_request:
     branches:
       - main
@@ -20,18 +21,12 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @(
-            './NetworkPolicyManager/package-portable.ps1',
-            '.\\NetworkPolicyManager\\本地网络策略管理器.ps1',
-            '.\\NetworkPolicyManager\\build.ps1',
-            '.\\NetworkPolicyManager\\test.ps1',
-            '.\\NetworkPolicyManager\\mcp\\setup.ps1'
-          )
+          $files = @(Get-ChildItem '.\NetworkPolicyManager' -Recurse -File -Filter '*.ps1')
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $file),
+              $file.FullName,
               [ref]$tokens,
               [ref]$errors
             )
@@ -44,7 +39,29 @@ jobs:
 
       - name: Manager self-test
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\NetworkPolicyManager\\本地网络策略管理器.ps1" -SelfTest
+        run: |
+          $manager = Get-ChildItem '.\NetworkPolicyManager' -File -Filter '*.ps1' |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if ($null -eq $manager) { throw 'Manager script not found.' }
+          & $manager.FullName -SelfTest
+
+      - name: Network switch memory regressions
+        shell: powershell
+        run: |
+          $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\tests\network-switch.tests.ps1" 2>&1
+          $output | Write-Host
+          if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'NETWORK_SWITCH_MEMORY_TESTS_OK cases=5 network_writes=0 file_writes=0') {
+            throw 'Network switch memory regressions did not complete successfully.'
+          }
+
+      - name: Read-only validation
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\test.ps1"
+
+      - name: UI smoke (runner DPI)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\test.ps1" -Ui
 
       - name: Build portable package
         shell: powershell

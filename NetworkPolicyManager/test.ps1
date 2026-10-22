@@ -21,6 +21,17 @@ function Invoke-ManagerReadOnly {
 Write-Host '1/4 PowerShell / 配置自检...' -ForegroundColor Cyan
 $selfTest = Invoke-ManagerReadOnly -Arguments @('-SelfTest')
 Write-Host ($selfTest -join [Environment]::NewLine) -ForegroundColor Green
+$switchTests = Join-Path $PSScriptRoot 'tests/network-switch.tests.ps1'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $switchTests
+if ($LASTEXITCODE -ne 0) { throw '换线策略内存回归检查失败。' }
+$statePath = Join-Path $PSScriptRoot 'manager-state.json'
+if (Test-Path -LiteralPath $statePath) {
+    $stateText = (Get-Content -LiteralPath $statePath -Raw -Encoding UTF8).Trim()
+    if (-not $stateText.StartsWith('[') -or -not $stateText.EndsWith(']')) {
+        throw 'manager-state.json 根节点必须保持为数组。'
+    }
+    [void](ConvertFrom-Json -InputObject $stateText)
+}
 
 Write-Host '2/4 自动识别接口...' -ForegroundColor Cyan
 $discoverText = (Invoke-ManagerReadOnly -Arguments @('-Command', 'Discover')) -join [Environment]::NewLine
