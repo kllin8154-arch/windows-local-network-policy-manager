@@ -55,6 +55,15 @@ jobs:
             throw 'Network switch memory regressions did not complete successfully.'
           }
 
+      - name: Read-only discovery
+        shell: powershell
+        run: |
+          $manager = Get-ChildItem '.\NetworkPolicyManager' -File -Filter '*.ps1' |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if ($null -eq $manager) { throw 'Manager script not found.' }
+          & $manager.FullName -Command Discover
+
       - name: Read-only validation
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\NetworkPolicyManager\test.ps1"
